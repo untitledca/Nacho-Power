@@ -5,6 +5,8 @@ import Foundation
 struct EcoFlowBluetoothSessionState {
     static let maximumStreamSilence: TimeInterval = 15
     static let maximumMeasurementAge: TimeInterval = 90
+    static let maximumVoltageAge: TimeInterval = 6
+    static let runtimePollInterval: TimeInterval = 2
 
     enum AuthenticationStage { case awaitingStatus, awaitingOwnerAcknowledgment, authenticated }
     enum PacketAction { case requestOwnerAuthentication, ownerAccepted, telemetryReceived, ignored }
@@ -14,8 +16,20 @@ struct EcoFlowBluetoothSessionState {
     private var fieldDates: [String: Date] = [:]
     private var authenticatedAt: Date?
     private var lastObservationAt: Date?
+    private var lastRuntimeRequestAt: Date?
 
     var isAuthenticated: Bool { authenticatedAt != nil }
+    var needsRuntimePolling: Bool { isAuthenticated && metrics.acConnected == nil }
+
+    /// Claim a polling slot without making requests count as received telemetry.
+    /// The monitor uses this for both the initial request and its repeating task.
+    mutating func takeRuntimeRequest(at date: Date) -> Bool {
+        guard needsRuntimePolling, !streamIsStale(at: date) else { return false }
+        if let previous = lastRuntimeRequestAt,
+           date.timeIntervalSince(previous) < Self.runtimePollInterval { return false }
+        lastRuntimeRequestAt = date
+        return true
+    }
 
     /// Route decrypted packets without dropping uploads interleaved with the
     /// handshake. This same path is used by the monitor and deterministic tests.
@@ -34,8 +48,13 @@ struct EcoFlowBluetoothSessionState {
             authenticate(at: date)
             return .ownerAccepted
         }
-        guard packet.source == 2, packet.commandSet == 0xfe, packet.command == 0x15 else { return .ignored }
-        let update = try EcoFlowWirelessProtocol.metrics(packet.payload)
+        guard packet.source == 2, packet.commandSet == 0xfe else { return .ignored }
+        let update: EcoFlowWirelessProtocol.Metrics
+        switch packet.command {
+        case 0x15: update = try EcoFlowWirelessProtocol.metrics(packet.payload)
+        case 0x16: update = try EcoFlowWirelessProtocol.runtimeMetrics(packet.payload)
+        default: return .ignored
+        }
         switch ingest(update, at: date) {
         case .accepted: return .telemetryReceived
         case .ignored: return .ignored
@@ -57,6 +76,9 @@ struct EcoFlowBluetoothSessionState {
         if let value = update.battery { metrics.battery = value; fieldDates["battery"] = date }
         if let value = update.acWatts { metrics.acWatts = value; fieldDates["acWatts"] = date }
         if let value = update.totalWatts { metrics.totalWatts = value; fieldDates["totalWatts"] = date }
+        if let value = update.acInputVoltage {
+            metrics.acInputVoltage = value; fieldDates["acInputVoltage"] = date
+        }
         // AC presence is an event-like Boolean, not a periodically measured
         // value. Missing fields in later uploads mean unchanged, not unknown.
         if let value = update.acConnected { metrics.acConnected = value }
@@ -78,16 +100,28 @@ struct EcoFlowBluetoothSessionState {
     func snapshot(deviceName: String, at date: Date) -> PowerTelemetry? {
         guard isAuthenticated, let observation = lastObservationAt,
               (-5...Self.maximumStreamSilence).contains(date.timeIntervalSince(observation)) else { return nil }
-        func fresh(_ field: String) -> Bool {
+        func fresh(_ field: String, maximumAge: TimeInterval = Self.maximumMeasurementAge,
+                   minimumAge: TimeInterval = -5) -> Bool {
             guard let observed = fieldDates[field] else { return false }
-            return (-5...Self.maximumMeasurementAge).contains(date.timeIntervalSince(observed))
+            return (minimumAge...maximumAge).contains(date.timeIntervalSince(observed))
+        }
+        // Older firmware's explicit presence flag remains authoritative. Newer
+        // firmware omits it, so use only a fresh AC-input voltage measurement.
+        // A disconnected input can retain a small residual voltage. Treat only
+        // near-zero voltage as disconnected; the range above 10V and below 80V
+        // is ambiguous rather than evidence of connected or disconnected mains.
+        var acConnected = metrics.acConnected
+        if acConnected == nil, fresh("acInputVoltage", maximumAge: Self.maximumVoltageAge, minimumAge: 0),
+           let voltage = metrics.acInputVoltage {
+            if (0...10).contains(voltage) { acConnected = false }
+            else if (80...300).contains(voltage) { acConnected = true }
         }
         return PowerTelemetry(
             deviceName: deviceName,
             batteryPercentage: fresh("battery") ? metrics.battery : nil,
             acInputWatts: fresh("acWatts") ? metrics.acWatts : nil,
             totalInputWatts: fresh("totalWatts") ? metrics.totalWatts : nil,
-            acConnected: metrics.acConnected,
+            acConnected: acConnected,
             sourceDescription: "Bluetooth · direct local connection",
             timestamp: observation
         )

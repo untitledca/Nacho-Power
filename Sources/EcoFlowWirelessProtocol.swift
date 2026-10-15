@@ -22,7 +22,7 @@ enum EcoFlowWirelessError: LocalizedError {
     }
 }
 
-/// Only session setup/authentication and incoming telemetry are implemented.
+/// Only session setup/authentication, telemetry requests and incoming readings are implemented.
 /// There are no device settings, power-output, Wi-Fi provisioning, or bind writes.
 enum EcoFlowWirelessProtocol {
     struct Advertisement {
@@ -75,6 +75,20 @@ enum EcoFlowWirelessProtocol {
         b += payload
         let crc = crc16(b)
         return b + [UInt8(truncatingIfNeeded: crc), UInt8(crc >> 8)]
+    }
+
+    /// Requests one RuntimePropertyUpload from the authenticated mobile address.
+    /// ConfigWrite field 72 triggers a read; it does not change upload intervals or
+    /// device settings. The schema permits only one command field per request.
+    static func runtimeUploadRequest() -> [UInt8] {
+        let payload: [UInt8] = [0xc0, 0x04, 0x01]
+        var bytes: [UInt8] = [0xaa, 0x13, UInt8(payload.count), 0]
+        bytes += [crc8(bytes), 0x0d, 0, 0, 0, 0, 0, 0, 0x21, 0x02, 1, 1, 0xfe, 0x11]
+        bytes += payload
+        // Outgoing V19 requests use CRC16, even though incoming V19 uploads can
+        // use a BB BB sentinel. Source 0x21 is required for local replies.
+        let checksum = crc16(bytes)
+        return bytes + [UInt8(truncatingIfNeeded: checksum), UInt8(checksum >> 8)]
     }
     static func parsePacket(_ bytes: [UInt8]) throws -> Packet {
         guard bytes.count >= 20, bytes[0] == 0xaa,
@@ -182,12 +196,24 @@ enum EcoFlowWirelessProtocol {
         var acWatts: Double?
         var totalWatts: Double?
         var acConnected: Bool?
-        var changed: Bool { battery != nil || acWatts != nil || totalWatts != nil || acConnected != nil }
+        var acInputVoltage: Double?
+        var changed: Bool { battery != nil || acWatts != nil || totalWatts != nil || acConnected != nil || acInputVoltage != nil }
     }
 
     /// DisplayPropertyUpload schema from upstream pd335_sys.proto. Missing fields
     /// remain unknown: protobuf updates are incremental, so never default to zero.
     static func metrics(_ data: [UInt8]) throws -> Metrics {
+        try parseMetrics(data, runtime: false)
+    }
+
+    /// RuntimePropertyUpload has a separate schema. Only its explicitly present
+    /// AC-input voltage is accepted; AC-output voltage and display fields cannot
+    /// identify mains presence here.
+    static func runtimeMetrics(_ data: [UInt8]) throws -> Metrics {
+        try parseMetrics(data, runtime: true)
+    }
+
+    private static func parseMetrics(_ data: [UInt8], runtime: Bool) throws -> Metrics {
         var cursor = 0, result = Metrics()
         func varint() throws -> UInt64 {
             var value: UInt64 = 0
@@ -206,7 +232,7 @@ enum EcoFlowWirelessProtocol {
             switch wire {
             case 0:
                 let value = try varint()
-                if field == 202, value <= 1 { result.acConnected = value == 1 }
+                if !runtime, field == 202, value <= 1 { result.acConnected = value == 1 }
             case 1:
                 guard cursor + 8 <= data.count else { throw EcoFlowWirelessError.invalidPacket }
                 cursor += 8
@@ -220,6 +246,10 @@ enum EcoFlowWirelessProtocol {
                 cursor += 4
                 let value = Double(Float(bitPattern: bits))
                 guard value.isFinite else { continue }
+                if runtime {
+                    if field == 68, (0...300).contains(value) { result.acInputVoltage = value }
+                    continue
+                }
                 if field == 262, (0...100).contains(value) { result.battery = value }
                 if field == 242, result.battery == nil, (0...100).contains(value) { result.battery = value }
                 if field == 54, (0...100_000).contains(value) { result.acWatts = value }

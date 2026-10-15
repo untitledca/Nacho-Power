@@ -145,7 +145,110 @@ private struct BluetoothSessionChecks {
         _ = try failedOwner.receive(ownerReply, stage: .awaitingOwnerAcknowledgment, at: time(2))
         check(snapshot(failedOwner, 2) == nil, "actual rejected acknowledgment clears early AC and battery")
 
-        print("PASS Bluetooth early telemetry routing, authentication gating, incremental AC continuity, resets, and stalled-session checks")
+        // RuntimePropertyUpload field 68 is the AC-input voltage, independently
+        // refreshed by polling. Field 67 is output voltage and must be ignored.
+        func runtimePacket(_ voltage: Float, field: UInt8 = 0xa5) -> EcoFlowWirelessProtocol.Packet {
+            let bits = voltage.bitPattern
+            return .init(source: 2, commandSet: 0xfe, command: 0x16,
+                         payload: [field, 0x04] + (0..<4).map { UInt8(truncatingIfNeeded: bits >> ($0 * 8)) })
+        }
+        var voltage = EcoFlowBluetoothSessionState()
+        check(!voltage.takeRuntimeRequest(at: time(0)), "never poll before authentication")
+        check(try voltage.receive(runtimePacket(121), stage: .awaitingStatus, at: time(0)) == .telemetryReceived,
+              "runtime-only upload uses the same early-telemetry buffering route")
+        check(snapshot(voltage, 0) == nil && !voltage.takeRuntimeRequest(at: time(0)),
+              "early runtime data cannot authorize display or polling")
+        _ = try voltage.receive(ownerReply, stage: .awaitingOwnerAcknowledgment, at: time(0.5))
+        check(snapshot(voltage, 0.5)?.acConnected == true && snapshot(voltage, 0.5)?.batteryPercentage == nil,
+              "fresh 121V AC-input fixture reports connected after owner acknowledgment")
+        check(voltage.takeRuntimeRequest(at: time(0.5)), "first authenticated runtime request is immediate")
+        check(!voltage.takeRuntimeRequest(at: time(0.5)) && !voltage.takeRuntimeRequest(at: time(2.49)),
+              "repeated callers cannot request more often than two seconds")
+        check(voltage.takeRuntimeRequest(at: time(2.5)), "runtime request is eligible at two seconds")
+        check(snapshot(voltage, 2.5)?.timestamp == time(0), "polling does not fabricate a telemetry observation")
+        _ = try voltage.receive(batteryPacket, stage: .authenticated, at: time(6))
+        check(snapshot(voltage, 6)?.acConnected == true, "six-second voltage freshness boundary is inclusive")
+        _ = try voltage.receive(batteryPacket, stage: .authenticated, at: time(6.01))
+        check(snapshot(voltage, 6.01)?.acConnected == nil && snapshot(voltage, 6.01)?.batteryPercentage == 86,
+              "continuing battery uploads cannot refresh expired voltage")
+        _ = try voltage.receive(runtimePacket(0), stage: .authenticated, at: time(7))
+        check(snapshot(voltage, 7)?.acConnected == false, "explicit zero-voltage fixture immediately reports unplugged")
+        _ = try voltage.receive(runtimePacket(121), stage: .authenticated, at: time(8))
+        check(snapshot(voltage, 8)?.acConnected == true, "fresh mains voltage reports reconnected")
+        _ = try voltage.receive(runtimePacket(1.8669419), stage: .authenticated, at: time(8.1))
+        check(snapshot(voltage, 8.1)?.acConnected == false,
+              "observed unplugged residual voltage reports disconnected")
+        _ = try voltage.receive(runtimePacket(10), stage: .authenticated, at: time(8.2))
+        check(snapshot(voltage, 8.2)?.acConnected == false, "near-zero upper boundary is disconnected")
+        _ = try voltage.receive(runtimePacket(10.1), stage: .authenticated, at: time(8.3))
+        check(snapshot(voltage, 8.3)?.acConnected == nil, "voltage above the near-zero boundary is unknown")
+        _ = try voltage.receive(runtimePacket(79.9), stage: .authenticated, at: time(8.4))
+        check(snapshot(voltage, 8.4)?.acConnected == nil, "voltage below the mains boundary is unknown")
+        _ = try voltage.receive(runtimePacket(25), stage: .authenticated, at: time(9))
+        check(snapshot(voltage, 9)?.acConnected == nil, "ambiguous low voltage clears the voltage-derived known state")
+        _ = try voltage.receive(runtimePacket(80), stage: .authenticated, at: time(10))
+        check(snapshot(voltage, 10)?.acConnected == true, "conservative mains lower bound is accepted")
+        _ = try voltage.receive(runtimePacket(300), stage: .authenticated, at: time(11))
+        check(snapshot(voltage, 11)?.acConnected == true, "conservative mains upper bound is accepted")
+        for invalid: Float in [.nan, .infinity, -.infinity, -1, 301] {
+            check(try voltage.receive(runtimePacket(invalid), stage: .authenticated, at: time(12)) == .ignored,
+                  "invalid voltage cannot replace or refresh a valid observation")
+        }
+        _ = try voltage.receive(batteryPacket, stage: .authenticated, at: time(17.01))
+        check(snapshot(voltage, 17.01)?.acConnected == nil,
+              "invalid voltage did not extend the previous valid voltage lifetime")
+
+        for explicitFlag in [false, true] {
+            let flagPacket = EcoFlowWirelessProtocol.Packet(source: 2, commandSet: 0xfe, command: 0x15,
+                payload: [0xd0, 0x0c, explicitFlag ? 1 : 0])
+            let contradictoryVoltage = runtimePacket(explicitFlag ? 0 : 121)
+            for runtimeFirst in [false, true] {
+                var priority = EcoFlowBluetoothSessionState()
+                priority.authenticate(at: time(0))
+                let packets = runtimeFirst ? [contradictoryVoltage, flagPacket] : [flagPacket, contradictoryVoltage]
+                for packet in packets { _ = try priority.receive(packet, stage: .authenticated, at: time(1)) }
+                check(snapshot(priority, 1)?.acConnected == explicitFlag,
+                      "explicit legacy presence wins in either packet order, including explicit false")
+                check(!priority.needsRuntimePolling && !priority.takeRuntimeRequest(at: time(2)),
+                      "a known legacy flag stops voltage polling")
+            }
+        }
+
+        var runtimeOnly = EcoFlowBluetoothSessionState()
+        runtimeOnly.authenticate(at: time(0))
+        check(try runtimeOnly.receive(runtimePacket(121, field: 0x9d), stage: .authenticated, at: time(1)) == .ignored,
+              "AC-output voltage does not enter the AC-input route or refresh liveness")
+        check(snapshot(runtimeOnly, 1) == nil, "output voltage alone cannot create a status snapshot")
+        for second in stride(from: 2, through: 20, by: 2) {
+            _ = try runtimeOnly.receive(runtimePacket(121), stage: .authenticated, at: time(Double(second)))
+        }
+        check(snapshot(runtimeOnly, 20)?.acConnected == true && !runtimeOnly.streamIsStale(at: time(20)),
+              "valid runtime voltage independently keeps the authenticated telemetry stream alive")
+        do {
+            _ = try runtimeOnly.receive(runtimePacket(0), stage: .authenticated, at: time(36))
+            preconditionFailure("Late runtime upload must require reconnection")
+        } catch { }
+        check(!runtimeOnly.isAuthenticated && snapshot(runtimeOnly, 36) == nil,
+              "runtime uploads cannot revive a stalled session")
+        runtimeOnly.authenticate(at: time(37))
+        check(snapshot(runtimeOnly, 37) == nil && runtimeOnly.takeRuntimeRequest(at: time(37)),
+              "reset clears voltage and the old polling cadence")
+        for second in stride(from: 39, through: 51, by: 2) {
+            check(runtimeOnly.takeRuntimeRequest(at: time(Double(second))), "read-only polling remains eligible during startup")
+        }
+        check(runtimeOnly.streamIsStale(at: time(52.01)) && !runtimeOnly.takeRuntimeRequest(at: time(52.01)),
+              "requests without replies cannot postpone the fifteen-second stream watchdog")
+
+        var rejectedVoltage = EcoFlowBluetoothSessionState()
+        _ = try rejectedVoltage.receive(runtimePacket(121), stage: .awaitingOwnerAcknowledgment, at: time(0))
+        do {
+            _ = try rejectedVoltage.receive(rejection, stage: .awaitingOwnerAcknowledgment, at: time(1))
+            preconditionFailure("Rejected owner acknowledgment must clear early voltage")
+        } catch { }
+        _ = try rejectedVoltage.receive(ownerReply, stage: .awaitingOwnerAcknowledgment, at: time(2))
+        check(snapshot(rejectedVoltage, 2) == nil, "failed owner authentication erases buffered runtime voltage")
+
+        print("PASS Bluetooth authentication, incremental legacy AC, runtime-voltage freshness, polling cadence, resets, and stalled-session checks")
     }
 
     private static func check(_ condition: Bool, _ message: String) {

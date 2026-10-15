@@ -22,6 +22,7 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
     private var pendingWrites: [Data] = []
     private var writeInProgress = false
     private var generation = 0
+    private var runtimePollTask: Task<Void, Never>?
     private var scanCandidates: [UUID: (CBPeripheral, EcoFlowWirelessProtocol.Advertisement)] = [:]
 
     static let service = CBUUID(string: "00000001-0000-1000-8000-00805f9b34fb")
@@ -74,6 +75,7 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
 
     func stop() {
         generation += 1
+        runtimePollTask?.cancel(); runtimePollTask = nil
         central?.stopScan()
         if let peripheral { peripheral.delegate = nil; central?.cancelPeripheralConnection(peripheral) }
         peripheral = nil; writeCharacteristic = nil; advertisement = nil
@@ -188,6 +190,42 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
         let packet = EcoFlowWirelessProtocol.authPacket(command: command, payload: payload)
         send(EcoFlowWirelessProtocol.wrap(try EcoFlowWirelessProtocol.crypt(packet, key: sessionKey, iv: iv, encrypt: true), encrypted: true))
     }
+
+    private func pollRuntimeIfNeeded() throws {
+        guard phase == .ready else { return }
+        let now = Date()
+        guard !readings.streamIsStale(at: now) else {
+            throw EcoFlowWirelessError.message("EcoFlow Bluetooth readings stopped. Reconnecting…")
+        }
+        // A stalled characteristic must not accumulate status requests while
+        // the previous encrypted write is still being acknowledged.
+        guard !writeInProgress, pendingWrites.isEmpty else { return }
+        guard readings.takeRuntimeRequest(at: now) else { return }
+        let packet = EcoFlowWirelessProtocol.runtimeUploadRequest()
+        let encrypted = try EcoFlowWirelessProtocol.crypt(packet, key: sessionKey, iv: iv, encrypt: true)
+        send(EcoFlowWirelessProtocol.wrap(encrypted, encrypted: true))
+    }
+
+    private func startRuntimePolling() throws {
+        runtimePollTask?.cancel(); runtimePollTask = nil
+        try pollRuntimeIfNeeded()
+        guard phase == .ready, readings.needsRuntimePolling else { return }
+        let currentGeneration = generation
+        runtimePollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(EcoFlowBluetoothSessionState.runtimePollInterval * 1_000_000_000))
+                } catch { return }
+                guard let self, self.generation == currentGeneration, self.phase == .ready else { return }
+                guard self.readings.needsRuntimePolling else {
+                    self.runtimePollTask = nil
+                    return
+                }
+                do { try self.pollRuntimeIfNeeded() }
+                catch { self.fail(error); return }
+            }
+        }
+    }
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         guard self.peripheral === peripheral, let data = characteristic.value else { return }
         guard error == nil else { fail(EcoFlowWirelessError.message("EcoFlow Bluetooth read failed.")); return }
@@ -231,8 +269,12 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
                 setPhase(.authenticating); try sendAuth(command: 0x86, payload: Array(auth.utf8))
             case .ownerAccepted:
                 setPhase(.ready)
+                try startRuntimePolling()
             case .telemetryReceived, .ignored:
                 // Early uploads remain private until the owner reply succeeds.
+                if !readings.needsRuntimePolling {
+                    runtimePollTask?.cancel(); runtimePollTask = nil
+                }
                 break
             }
         default: break

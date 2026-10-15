@@ -29,6 +29,8 @@ private func knownSecret(_ publicKey: UnsafePointer<UInt8>, _ privateKey: Unsafe
             ("captured V19 packets with CRC and XOR payload", capturedPackets),
             ("sentinel V19 packets and malformed packet rejection", sentinelAndMalformedPackets),
             ("protobuf presence, explicit AC at 0 W, and invalid readings", protobufFields),
+            ("runtime status request matches the authenticated mobile route", runtimeRequest),
+            ("runtime voltage schema, zero volts, and malformed boundaries", runtimeFields),
             ("manufacturer identity, serial selection and encryption flags", advertisements)
         ]
         var failures = 0
@@ -161,6 +163,53 @@ private func knownSecret(_ publicKey: UnsafePointer<UInt8>, _ privateKey: Unsafe
         advertisement[0] = 0x01
         try check(P.Advertisement.parse(Data(advertisement)) == nil, "foreign manufacturer ignored")
         try check(P.Advertisement.parse(Data([0xb5, 0xb5, 3])) == nil, "truncated advertisement ignored")
+    }
+
+    private static func runtimeRequest() throws {
+        // Independently serialized using upstream Packet(0x21,0x02,0xFE,0x11,
+        // bytes.fromhex("c00401"),1,1,0x13); the live DELTA accepts source 0x21.
+        let expected = hex("aa130300430d00000000000021020101fe11c004013e18")
+        let bytes = P.runtimeUploadRequest()
+        try check(bytes == expected, "exact one-shot runtime upload request")
+        try check(P.crc8(Array(bytes.prefix(4))) == bytes[4] && P.crc16(bytes) == 0, "request header and trailing checksums")
+        try check(bytes[1] == 0x13 && bytes[13] == 2 && bytes[14] == 1 && bytes[15] == 1, "V19 EMS destination and device routing")
+        let packet = try P.parsePacket(bytes)
+        try check(packet.source == 0x21 && packet.commandSet == 0xfe && packet.command == 0x11, "authenticated mobile request route")
+        try check(packet.payload == hex("c00401"), "only field72=true, no display trigger or persistent setting")
+
+        let key = [UInt8](repeating: 1, count: 16), iv = [UInt8](repeating: 2, count: 16)
+        let encrypted = try P.crypt(bytes, key: key, iv: iv, encrypt: true)
+        let frame = P.wrap(encrypted, encrypted: true)
+        try check(Array(frame.prefix(4)) == hex("5a5a1001"), "standard encrypted protocol wrapper")
+        var stream = P.FrameBuffer()
+        let frames = try stream.append(Data(frame))
+        try check(frames.count == 1 && !frames[0].command, "runtime request is a protocol frame")
+        try check(try P.crypt(frames[0].payload, key: key, iv: iv, encrypt: false) == expected, "runtime request survives encryption and framing")
+    }
+
+    private static func runtimeFields() throws {
+        // Field68 fixed32 float=121 V, then explicit zero. Zero must be present.
+        let mains = try P.runtimeMetrics(hex("a5040000f242"))
+        let disconnected = try P.runtimeMetrics(hex("a50400000000"))
+        try check(mains.changed && mains.acInputVoltage == 121, "AC input volts accepted")
+        try check(disconnected.changed && disconnected.acInputVoltage == 0, "explicit zero volts retained")
+        try check(!P.runtimeMetrics([]).changed, "missing voltage remains unknown")
+        try check(try P.runtimeMetrics(hex("a50400009643")).acInputVoltage == 300, "upper voltage bound accepted")
+        // AC-output voltage67, display SOC262, watts54/3, and flag202 are not
+        // runtime mains evidence, even when their values look plausible.
+        let unrelated = hex("9d040000f242b5100000c842b5030000c8431d0000c843d00c01")
+        try check(try !P.runtimeMetrics(unrelated).changed, "output voltage and display fields ignored")
+        try check(try P.runtimeMetrics(unrelated + hex("a5040000f242")).acInputVoltage == 121, "unknown fields do not hide valid AC input")
+        try check(try !P.metrics(hex("a5040000f242")).changed, "runtime field cannot be decoded as display data")
+        // NaN, +infinity, -infinity, -1, and 301 V are invalid observations.
+        for bits in ["0000c07f", "0000807f", "000080ff", "000080bf", "00809643"] {
+            try check(try !P.runtimeMetrics(hex("a504" + bits)).changed, "invalid voltage ignored: \(bits)")
+        }
+        for bytes in [hex("a504"), hex("a5040000"), hex("a2047f"), hex("a1040000"),
+                      hex("a004"), [UInt8](repeating: 0xff, count: 10), hex("00"), hex("0b")] {
+            try expectFailure("malformed runtime protobuf accepted") { _ = try P.runtimeMetrics(bytes) }
+        }
+        try check(try !P.runtimeMetrics(hex("a00401")).changed, "wrong wire type cannot become voltage")
     }
 
     private static let capturedV19: [String] = [
