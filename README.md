@@ -1,6 +1,6 @@
-# EcoFlow Cat
+# Nacho Power
 
-<img src="Resources/EcoFlowCatLogo.png" width="180" alt="EcoFlow Cat logo">
+<img src="Resources/NachoPowerLogo.png" width="180" alt="Nacho Power logo">
 
 A Mac app that reminds you to reconnect your EcoFlow to AC power. It shows the station's battery percentage in the Dock and plays a transparent cat above your desktop when AC is disconnected. Clicks and keystrokes continue to reach the apps behind the cat.
 
@@ -10,20 +10,34 @@ The app includes both cat videos and the logo. No Terminal, developer tools, Pow
 
 ## Install
 
-Download the universal DMG from this repository's Releases page. Open it, drag **EcoFlow Cat.app** into **Applications**, eject the disk image, and open the installed app. Click its Dock icon or menu-bar icon to open Settings, preview the cat, or quit.
+Download the universal DMG from this repository's Releases page. Open it, drag **Nacho Power.app** into **Applications**, eject the disk image, and open the installed app. Click its Dock icon or menu-bar icon to open Settings, preview the cat, or quit.
+
+Nacho Power was previously named **EcoFlow Cat**. When upgrading an older installation, quit EcoFlow Cat before opening Nacho Power. Your settings and saved EcoFlow sign-in are preserved. After installing Nacho Power, remove the old **EcoFlow Cat.app** from Applications to avoid launching both copies and competing for the station's connection.
 
 The distributed app is ad-hoc signed and is not notarized by Apple. If macOS blocks it, follow [Apple's instructions for opening an app you trust](https://support.apple.com/en-us/102445).
 
 Requires macOS 14 or newer. The app contains native Apple silicon and Intel binaries.
 
+## Updates
+
+Starting with **v1.3.0**, choose **Check for Updates** in Settings or the menu bar to check the latest published GitHub release. Automatic checks run once a day while the app is open and show an update notice in the app and menu when a newer release is available. You can turn automatic checks off in Settings.
+
+**Download installer** opens that release's DMG on GitHub. Installer filenames follow `Nacho-Power-VERSION-universal.dmg`. Open the downloaded disk image, quit Nacho Power, and replace the app in Applications. Updates require this installation step; the app does not install or restart itself automatically. The update check reads public release information from GitHub and does not send your EcoFlow credentials, station telemetry, or Venmo information.
+
+**Users on v1.2.0 or earlier need to [download and install a newer release](https://github.com/untitledca/Nacho-Power/releases/latest) once** to get the update checker. Those older copies cannot receive an updater retroactively.
+
+## Support Nacho Power
+
+If you like the app, [buy me a beer on Venmo](https://venmo.com/u/chaseabrams99) 🍺. The same link is available in Settings and the menu bar. Tips are optional, and you choose the amount in Venmo.
+
 ## Connect and use
 
-**Quit the official EcoFlow app before connecting EcoFlow Cat.** It can hold the station's Bluetooth or Wi-Fi connection. Quit PowerManager as well when using USB.
+**Quit the official EcoFlow app before connecting Nacho Power.** It can hold the station's Bluetooth or Wi-Fi connection. Quit PowerManager as well when using USB.
 
 Open **Connection settings**, choose a transport, enter any required details, and select **Save & connect**:
 
 - **USB:** Connect the station's USB data connection to your Mac. No cloud account or internet access is needed.
-- **Bluetooth:** Allow EcoFlow Cat to use Bluetooth when macOS asks. It automatically finds your nearby supported DELTA and uses the account identity from a signed-in official EcoFlow app on this Mac when available. If account setup is needed, use **Sign in for Bluetooth** with your normal EcoFlow email and password. You do not need to find or type a numeric account code. This mode is a direct local connection and does not need internet after setup. An optional device serial number can select a specific station when several are nearby.
+- **Bluetooth:** Allow Nacho Power to use Bluetooth when macOS asks. It automatically finds your nearby supported DELTA and uses the account identity from a signed-in official EcoFlow app on this Mac when available. If account setup is needed, use **Sign in for Bluetooth** with your normal EcoFlow email and password. You do not need to find or type a numeric account code. This mode is a direct local connection and does not need internet after setup. An optional device serial number can select a specific station when several are nearby.
 - **Wi-Fi (cloud):** Keep the station online through Wi-Fi. Enter its serial number, account region, and your EcoFlow developer access and secret keys. This mode uses EcoFlow's cloud API and requires internet access; it does not provide an offline connection to a station's Wi-Fi hotspot.
 - **Automatic:** Tries USB first, then Bluetooth, then configured Wi-Fi cloud access. This is the default connection mode.
 
@@ -75,4 +89,4 @@ Preparation checks decoded alpha pixels in the masters, makes smaller native HEV
 
 The supplied animation uses a **1920 × 1080 canvas at 24 fps**: a **20-second intro** and a **16.625-second loop**. The two converted movies total approximately **12.9 MB**. Dismissal is an AppKit/Core Animation pop, so no outro asset is required.
 
-The logo was generated from the supplied cat photograph using the built-in image generator. The [design prompt](docs/logo-prompt.txt) and [icon packager](tools/make-app-icon.swift) are included.
+The logo was generated from the supplied cat photograph using the built-in image generator. The [design prompt](docs/new-name-logo-prompt.txt) and [icon packager](tools/make-app-icon.swift) are included.

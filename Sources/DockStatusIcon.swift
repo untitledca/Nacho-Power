@@ -36,9 +36,9 @@ struct DockPowerStatus: Equatable {
     var accessibilityDescription: String {
         let battery = batteryPercentage.map { "Battery \($0) percent" } ?? "Battery unavailable"
         switch acState {
-        case .connected: return "EcoFlow Cat · \(battery) · AC connected"
-        case .disconnected: return "EcoFlow Cat · \(battery) · AC disconnected"
-        case .unknown: return "EcoFlow Cat · \(battery) · AC status unavailable"
+        case .connected: return "Nacho Power · \(battery) · AC connected"
+        case .disconnected: return "Nacho Power · \(battery) · AC disconnected"
+        case .unknown: return "Nacho Power · \(battery) · AC status unavailable"
         }
     }
 }

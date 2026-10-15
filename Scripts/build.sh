@@ -2,7 +2,7 @@
 set -eu
 SCRIPT_DIR="${0:A:h}"
 PROJECT_DIR="${SCRIPT_DIR:h}"
-APP_DIR="$PROJECT_DIR/dist/EcoFlow Cat.app"
+APP_DIR="$PROJECT_DIR/dist/Nacho Power.app"
 ASSET_DIR="${1:-$PROJECT_DIR/Assets}"
 mkdir -p "$PROJECT_DIR/.build" "$PROJECT_DIR/dist"
 if [[ ! -f "$PROJECT_DIR/Resources/ThirdPartyNotices.txt" ]]; then
@@ -19,11 +19,11 @@ done
 # metadata after signing and invalidate the distributed bundle.
 BUILD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ecoflow-build.XXXXXX")
 trap 'rm -rf "$BUILD_DIR"' EXIT
-BUILD_APP_DIR="$BUILD_DIR/EcoFlow Cat.app"
+BUILD_APP_DIR="$BUILD_DIR/Nacho Power.app"
 mkdir -p "$BUILD_APP_DIR/Contents/MacOS" "$BUILD_APP_DIR/Contents/Resources"
 BINARIES=()
 for architecture in arm64 x86_64; do
-    binary="$BUILD_DIR/EcoFlowCat-$architecture"
+    binary="$BUILD_DIR/NachoPower-$architecture"
     crypto="$BUILD_DIR/EcoFlowCrypto-$architecture.o"
     xcrun clang -O2 -target "$architecture-apple-macos14.0" \
         -c "$PROJECT_DIR/Sources/EcoFlowCrypto.c" -o "$crypto"
@@ -32,7 +32,7 @@ for architecture in arm64 x86_64; do
         "$PROJECT_DIR"/Sources/*.swift "$crypto" -o "$binary"
     BINARIES+=("$binary")
 done
-xcrun lipo -create "${BINARIES[@]}" -output "$BUILD_APP_DIR/Contents/MacOS/EcoFlowCat"
+xcrun lipo -create "${BINARIES[@]}" -output "$BUILD_APP_DIR/Contents/MacOS/NachoPower"
 cp -X "$PROJECT_DIR/Resources/Info.plist" "$BUILD_APP_DIR/Contents/Info.plist"
 # Include branding, ThirdPartyNotices.txt, and all other bundle resources.
 for resource in "$PROJECT_DIR"/Resources/*(N); do

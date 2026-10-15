@@ -16,7 +16,7 @@ enum DirectEcoFlowError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .powerManagerRunning: return "Quit EcoFlow PowerManager so EcoFlow Cat can read the USB connection directly."
+        case .powerManagerRunning: return "Quit EcoFlow PowerManager so Nacho Power can read the USB connection directly."
         case .noDevice: return "Connect a supported EcoFlow power station to this Mac by USB."
         case .multipleDevices: return "Connect one EcoFlow power station at a time."
         case .unsupportedDevice: return "This EcoFlow does not expose the supported USB power readings."

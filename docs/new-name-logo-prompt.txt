@@ -1,0 +1,14 @@
+Generated with the built-in image_gen tool in edit mode on 2026-10-14.
+The final name requested by the user is Nacho Power.
+Source: an intermediate logo edit derived from Resources/EcoFlowCatLogo.png (the previous app logo).
+Output: Resources/NachoPowerLogo.png
+Transparency requested and preserved. Source assets were left unchanged during generation.
+
+Use case: text-localization
+Asset type: macOS application icon, square PNG with genuine alpha transparency.
+Input image 1 is the edit target, the existing purple cat-and-power application logo.
+Primary request: Replace ONLY the second-line word "Battery" with the exact word "Power". The final app name is "Nacho Power" on two lines, with "Nacho" unchanged on the first line.
+Text (verbatim): "Nacho Power".
+Preserve the original friendly chunky rounded lettering style, white/pale-lavender shading and purple glow. Preserve the green power-symbol o in Nacho exactly. Fit Power comfortably within the same lower plaque area, preserving the purple horizontal accents.
+Constraints: Keep the identical cat identity, facial details, anatomy, proportions, body position and raised hind paw; keep the original purple rounded-square badge, border, purple background, green lightning bolt and green wireless arcs, composition and glossy illustrated finish. Change only the second-line lettering and its necessary size/spacing. Do not add new elements. Remove all Battery lettering. Preserve fully transparent pixels outside the badge and around the protruding paw; no opaque canvas and no baked-in checkerboard.
+Output a finished square transparent PNG.

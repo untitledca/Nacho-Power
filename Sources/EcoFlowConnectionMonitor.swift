@@ -70,7 +70,7 @@ final class EcoFlowConnectionMonitor {
     func snapshot(configuration: EcoFlowConnectionConfiguration) async throws -> PowerTelemetry {
         guard !Self.officialAppIsRunning else {
             bluetooth.stop()
-            throw EcoFlowWirelessError.message("Quit the EcoFlow app / PowerManager so EcoFlow Cat can connect to the DELTA.")
+            throw EcoFlowWirelessError.message("Quit the EcoFlow app / PowerManager so Nacho Power can connect to the DELTA.")
         }
         switch configuration.transport {
         case .usb:

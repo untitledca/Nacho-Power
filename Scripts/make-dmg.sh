@@ -2,14 +2,14 @@
 set -eu
 SCRIPT_DIR="${0:A:h}"
 PROJECT_DIR="${SCRIPT_DIR:h}"
-APP_DIR="${1:-$PROJECT_DIR/dist/EcoFlow Cat.app}"
-if [[ ! -f "$APP_DIR/Contents/MacOS/EcoFlowCat" ]]; then
+APP_DIR="${1:-$PROJECT_DIR/dist/Nacho Power.app}"
+if [[ ! -f "$APP_DIR/Contents/MacOS/NachoPower" ]]; then
     print -u2 "Build the app with Scripts/build.sh before making the disk image."
     exit 1
 fi
 APP_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_DIR/Contents/Info.plist")
-OUTPUT_DMG="${2:-$PROJECT_DIR/dist/EcoFlow-Cat-$APP_VERSION-universal.dmg}"
-architectures=$(xcrun lipo -archs "$APP_DIR/Contents/MacOS/EcoFlowCat")
+OUTPUT_DMG="${2:-$PROJECT_DIR/dist/Nacho-Power-$APP_VERSION-universal.dmg}"
+architectures=$(xcrun lipo -archs "$APP_DIR/Contents/MacOS/NachoPower")
 if [[ " $architectures " != *" arm64 "* || " $architectures " != *" x86_64 "* ]]; then
     print -u2 "The disk image requires a universal app containing arm64 and x86_64."
     exit 1
@@ -31,22 +31,22 @@ done
 mkdir -p "$PROJECT_DIR/.build" "${OUTPUT_DMG:h}"
 DMG_BUILD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ecoflow-dmg.XXXXXX")
 trap 'rm -rf "$DMG_BUILD_DIR"' EXIT
-DMG_STAGE="$DMG_BUILD_DIR/EcoFlow Cat"
+DMG_STAGE="$DMG_BUILD_DIR/Nacho Power"
 mkdir -p "$DMG_STAGE"
 # Preserve the complete signed bundle and symbolic links.
-ditto --noextattr --norsrc "$APP_DIR" "$DMG_STAGE/EcoFlow Cat.app"
-codesign --verify --deep --strict "$DMG_STAGE/EcoFlow Cat.app"
+ditto --noextattr --norsrc "$APP_DIR" "$DMG_STAGE/Nacho Power.app"
+codesign --verify --deep --strict "$DMG_STAGE/Nacho Power.app"
 ln -s /Applications "$DMG_STAGE/Applications"
 cat > "$DMG_STAGE/Install.txt" <<'INSTALL'
-EcoFlow Cat for Mac
+Nacho Power for Mac
 
 Requires macOS 14 or later. Works on Apple silicon and Intel Macs.
 Both cat videos and the app icon are included.
 
 Install
-1. Drag EcoFlow Cat.app onto the Applications folder beside it.
+1. Drag Nacho Power.app onto the Applications folder beside it.
 2. Eject this disk image.
-3. Open EcoFlow Cat from your Applications folder.
+3. Open Nacho Power from your Applications folder.
 4. Click its Dock icon or menu bar icon to open Settings or preview the cat.
 
 Power connection
@@ -66,20 +66,30 @@ When AC is disconnected, the intro plays once and the loop repeats.
 Reconnecting AC immediately starts a short pop dismissal, even at 0 W.
 Open Settings to choose an immediate reminder or a battery threshold.
 
-No Terminal, compiler, or developer tools are needed to run EcoFlow Cat.
+No Terminal, compiler, or developer tools are needed to run Nacho Power.
+
+Updates and support
+Choose Check for Updates in Settings or the menu bar. Automatic checks run
+daily while the app is open and can be turned off in Settings. Download
+the new installer, quit Nacho Power, and replace the app in Applications.
+Your settings are kept. Upgrading from EcoFlow Cat? Quit and remove the old
+EcoFlow Cat.app after installing Nacho Power so only one copy runs.
+Copies older than v1.3.0 need one manual upgrade to get update checks.
+If you like the app, choose Buy me a beer to open @chaseabrams99 on Venmo.
+Tips are optional and you choose the amount.
 
 First launch
 This build is locally signed and has not been notarized by Apple. If macOS
 blocks it as an unverified developer, first attempt to open the installed app.
 If you trust this copy, open System Settings > Privacy & Security and choose
-Open Anyway for EcoFlow Cat, then confirm Open. Your Mac's administrator may
+Open Anyway for Nacho Power, then confirm Open. Your Mac's administrator may
 restrict this option. This approval applies to this app only.
 Apple's instructions: https://support.apple.com/en-us/102445
 
 Remove
-Quit EcoFlow Cat from its menu bar icon, then move the app to Trash.
+Quit Nacho Power from its menu bar icon, then move the app to Trash.
 
-Third-party notices are included inside EcoFlow Cat.app under
+Third-party notices are included inside Nacho Power.app under
 Contents/Resources/ThirdPartyNotices.txt.
 INSTALL
 if [[ -f "$APP_DIR/Contents/Resources/AppIcon.icns" ]]; then
@@ -88,7 +98,7 @@ if [[ -f "$APP_DIR/Contents/Resources/AppIcon.icns" ]]; then
         "$SETFILE_PATH" -a C "$DMG_STAGE"
     fi
 fi
-hdiutil create -volname "EcoFlow Cat" -srcfolder "$DMG_STAGE" -fs HFS+ \
+hdiutil create -volname "Nacho Power" -srcfolder "$DMG_STAGE" -fs HFS+ \
     -format UDZO -imagekey zlib-level=9 -ov "$OUTPUT_DMG"
 hdiutil verify "$OUTPUT_DMG"
 (cd "${OUTPUT_DMG:h}" && shasum -a 256 "${OUTPUT_DMG:t}") > "$OUTPUT_DMG.sha256"

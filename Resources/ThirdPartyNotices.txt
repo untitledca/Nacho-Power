@@ -1,4 +1,4 @@
-EcoFlow Cat protocol acknowledgments
+Nacho Power protocol acknowledgments
 
 USB CDC telemetry framing references r3pcomms:
 https://github.com/greyltc/r3pcomms
@@ -25,7 +25,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-Native USB access uses macOS system frameworks. EcoFlow Cat does not bundle
+Native USB access uses macOS system frameworks. Nacho Power does not bundle
 PowerManager, Network UPS Tools, libusb, Qt, or the proprietary EcoFlow app.
 
 

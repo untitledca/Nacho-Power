@@ -1,3 +1,6 @@
+Historical logo prompt from before the app was renamed Nacho Power.
+The wording below records the original generation request and its original asset filename.
+
 Generation method: built-in image_gen tool, editing the supplied cat photograph.
 Reference: the supplied photograph of the user's tabby cat.
 Output: Resources/EcoFlowCatLogo.png

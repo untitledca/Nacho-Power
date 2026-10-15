@@ -10,7 +10,7 @@ let projectDirectory = CommandLine.arguments.dropFirst().first.map {
 let iconsetDirectory = projectDirectory.appendingPathComponent(".build/AppIcon.iconset", isDirectory: true)
 let resourceDirectory = projectDirectory.appendingPathComponent("Resources", isDirectory: true)
 let iconURL = resourceDirectory.appendingPathComponent("AppIcon.icns")
-let logoURL = resourceDirectory.appendingPathComponent("EcoFlowCatLogo.png")
+let logoURL = resourceDirectory.appendingPathComponent("NachoPowerLogo.png")
 
 func renderIcon(pixels: Int, image: NSImage) throws -> Data {
     guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil,
@@ -42,7 +42,7 @@ func renderIcon(pixels: Int, image: NSImage) throws -> Data {
 do {
     guard let logo = NSImage(contentsOf: logoURL) else {
         throw NSError(domain: "EcoFlowCat.Icon", code: 3,
-                      userInfo: [NSLocalizedDescriptionKey: "Missing EcoFlowCatLogo.png."])
+                      userInfo: [NSLocalizedDescriptionKey: "Missing NachoPowerLogo.png."])
     }
     try FileManager.default.createDirectory(at: iconsetDirectory, withIntermediateDirectories: true)
     for size in [16, 32, 128, 256, 512] {

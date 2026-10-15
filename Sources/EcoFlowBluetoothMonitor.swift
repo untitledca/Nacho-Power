@@ -44,7 +44,7 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
             throw EcoFlowWirelessError.message("Sign in to your EcoFlow account in Connection settings to enable Bluetooth.")
         }
         if central == nil { central = CBCentralManager(delegate: self, queue: .main) }
-        if central.state == .unauthorized { throw EcoFlowWirelessError.message("Allow Bluetooth for EcoFlow Cat in System Settings → Privacy & Security → Bluetooth.") }
+        if central.state == .unauthorized { throw EcoFlowWirelessError.message("Allow Bluetooth for Nacho Power in System Settings → Privacy & Security → Bluetooth.") }
         if central.state == .poweredOff { throw EcoFlowWirelessError.message("Turn on Bluetooth to connect to the EcoFlow.") }
         if central.state == .unsupported { throw EcoFlowWirelessError.message("Bluetooth Low Energy is unavailable on this Mac.") }
         if phase == .ready && Date().timeIntervalSince(lastReading) > 15 {

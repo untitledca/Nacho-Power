@@ -11,13 +11,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var dockLogo: NSImage?
     private var lastDockStatus: DockPowerStatus?
     private var dockRefreshTimer: Timer?
+    private let updates = AppUpdateChecker()
+    private var manualUpdateCheckInProgress = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.regular)
         let mainMenu = NSMenu()
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu()
-        let quitItem = NSMenuItem(title: "Quit EcoFlow Cat", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let updateMenuItem = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
+        updateMenuItem.target = self
+        appMenu.addItem(updateMenuItem)
+        let supportMenuItem = NSMenuItem(title: "Buy me a beer…", action: #selector(openSupport), keyEquivalent: "")
+        supportMenuItem.target = self
+        appMenu.addItem(supportMenuItem)
+        appMenu.addItem(.separator())
+        let quitItem = NSMenuItem(title: "Quit Nacho Power", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appMenu.addItem(quitItem)
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
@@ -25,11 +34,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let assetDirectory = Bundle.main.resourceURL ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Assets")
         model = AppModel(assetDirectory: assetDirectory)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let logoURL = Bundle.main.url(forResource: "EcoFlowCatLogo", withExtension: "png"),
+        if let logoURL = Bundle.main.url(forResource: "NachoPowerLogo", withExtension: "png"),
            let logo = NSImage(contentsOf: logoURL) {
             dockLogo = logo
         }
-        statusItem.button?.setAccessibilityLabel("EcoFlow Cat")
+        statusItem.button?.setAccessibilityLabel("Nacho Power")
         statusItem.menu = NSMenu()
         statusItem.menu?.delegate = self
         model.onStatusChanged = { [weak self] in
@@ -39,6 +48,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
         updatePowerIndicators()
         updateMenu()
+        updates.onChange = { [weak self] in
+            guard let self else { return }
+            if !menuIsOpen { updateMenu() }
+        }
+        updates.start()
         // A stalled transport must not leave an old green/red percentage in
         // the Dock indefinitely. Rendering is cached until the state changes.
         dockRefreshTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
@@ -60,6 +74,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     func applicationWillTerminate(_ notification: Notification) {
         dockRefreshTimer?.invalidate()
+        updates.stop()
         model?.stop()
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
@@ -73,10 +88,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private func updateMenu() {
         guard let menu = statusItem?.menu, let model else { return }
         menu.removeAllItems()
-        addDisabled("EcoFlow Cat", to: menu)
+        addDisabled("Nacho Power", to: menu)
         addDisabled(model.phaseDescription, to: menu)
         if model.isConnected {
             addDisabled("Battery \(model.batteryText)   ·   Input \(model.inputText)", to: menu)
+        }
+        if let release = updates.latestRelease, updates.state == .updateAvailable {
+            let download = NSMenuItem(title: "Update available · Download \(release.version)…", action: #selector(downloadUpdate), keyEquivalent: "")
+            download.target = self
+            download.image = NSImage(systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: "Update available")
+            menu.addItem(download)
         }
         menu.addItem(.separator())
         let enabled = NSMenuItem(title: "Enable reminders", action: #selector(toggleEnabled), keyEquivalent: "")
@@ -90,7 +111,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         settings.target = self
         menu.addItem(settings)
         menu.addItem(.separator())
-        let quit = NSMenuItem(title: "Quit EcoFlow Cat", action: #selector(quit), keyEquivalent: "q")
+        let check = NSMenuItem(title: updates.state == .checking ? "Checking for Updates…" : "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
+        check.target = self
+        check.isEnabled = updates.state != .checking
+        menu.addItem(check)
+        let support = NSMenuItem(title: "Buy me a beer…", action: #selector(openSupport), keyEquivalent: "")
+        support.target = self
+        menu.addItem(support)
+        menu.addItem(.separator())
+        let quit = NSMenuItem(title: "Quit Nacho Power", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
     }
@@ -124,11 +153,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
     @objc private func quit() { NSApplication.shared.terminate(nil) }
 
+    @objc private func openSupport() { NSWorkspace.shared.open(AppSupportLinks.venmoURL) }
+
+    @objc private func downloadUpdate() {
+        guard updates.state == .updateAvailable, let release = updates.latestRelease else { return }
+        NSWorkspace.shared.open(release.downloadURL)
+    }
+
+    @objc private func checkForUpdates() {
+        guard !manualUpdateCheckInProgress else { return }
+        manualUpdateCheckInProgress = true
+        Task { [weak self] in
+            guard let self else { return }
+            defer { manualUpdateCheckInProgress = false }
+            await updates.checkForUpdates()
+            NSApplication.shared.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.alertStyle = .informational
+            if updates.state == .updateAvailable, let release = updates.latestRelease {
+                alert.messageText = "Nacho Power \(release.version) is available"
+                alert.informativeText = "You have version \(updates.currentVersion). Download the new installer, quit Nacho Power, and drag the new app into Applications to replace it. Your settings are kept."
+                alert.addButton(withTitle: "Download Installer")
+                alert.addButton(withTitle: "Not Now")
+                alert.addButton(withTitle: "Release Notes")
+                let response = alert.runModal()
+                if response == .alertFirstButtonReturn { NSWorkspace.shared.open(release.downloadURL) }
+                if response == .alertThirdButtonReturn { NSWorkspace.shared.open(release.releaseURL) }
+            } else if updates.state == .current {
+                alert.messageText = "You’re up to date"
+                alert.informativeText = "Nacho Power \(updates.currentVersion) is installed. No newer release is available."
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
+            } else {
+                alert.messageText = "Couldn’t check for updates"
+                alert.informativeText = updates.errorMessage ?? "Please try again, or open the GitHub releases page."
+                alert.addButton(withTitle: "OK")
+                alert.addButton(withTitle: "Open Releases")
+                if alert.runModal() == .alertSecondButtonReturn { NSWorkspace.shared.open(AppUpdateChecker.releasesURL) }
+            }
+        }
+    }
+
     @objc private func showSettings() {
         if settingsWindow == nil {
-            let controller = NSHostingController(rootView: SettingsView(model: model))
+            let controller = NSHostingController(rootView: SettingsView(model: model, updates: updates))
             let window = NSWindow(contentViewController: controller)
-            window.title = "EcoFlow Cat"
+            window.title = "Nacho Power"
             window.styleMask = [.titled, .closable, .miniaturizable]
             window.isReleasedWhenClosed = false
             window.delegate = self

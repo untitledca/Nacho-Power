@@ -1,6 +1,6 @@
 # Direct EcoFlow USB monitoring
 
-EcoFlow Cat’s USB mode reads the power station directly through native macOS USB and serial APIs. It does not require PowerManager, NUT, Homebrew, Python, a cloud account, internet access, or installed third-party drivers. Connect one supported EcoFlow by USB and quit PowerManager before opening EcoFlow Cat.
+Nacho Power’s USB mode reads the power station directly through native macOS USB and serial APIs. It does not require PowerManager, NUT, Homebrew, Python, a cloud account, internet access, or installed third-party drivers. Connect one supported EcoFlow by USB and quit PowerManager before opening Nacho Power.
 
 ## Read-only implementation
 
@@ -10,7 +10,7 @@ The monitor matches USB vendor/product `3746:ffff`, discovers the HID interface 
 
 The USB CDC modem belonging to that same EcoFlow is discovered through IOKit's USB-parent hierarchy. The monitor configures the local serial connection for 115200 baud/raw reads, restores its original terminal settings on close, and sends only the read-only telemetry query documented by [r3pcomms](https://github.com/greyltc/r3pcomms). The query requests measurements, never device controls or serial identification. CRC, packet size, response opcode, sequence, and segment lengths are validated. The entire serial exchange has a 1.5-second monotonic deadline. Only input-power fields are retained; serial/identifier fields are ignored.
 
-Native `IOHIDManager` enumeration returned no EcoFlow devices on this Mac. Direct `IOUSBHostDevice` control reads work without a permission helper, privileged process, or device capture. The existing vendor PowerManagerService remains installed, but EcoFlow Cat neither connects to it nor uses any of its files, ports, APIs or processes. Apple's `ioupsd` is untouched.
+Native `IOHIDManager` enumeration returned no EcoFlow devices on this Mac. Direct `IOUSBHostDevice` control reads work without a permission helper, privileged process, or device capture. The existing vendor PowerManagerService remains installed, but Nacho Power neither connects to it nor uses any of its files, ports, APIs or processes. Apple's `ioupsd` is untouched.
 
 ## Input-power interpretation
 
@@ -45,4 +45,4 @@ Checks cover HID descriptor/bit parsing, wire-report IDs, known battery and AC f
 
 - [Apple IOUSBHostDevice](https://developer.apple.com/documentation/iousbhost/iousbhostdevice) and the installed Apple SDK headers define the native USB request APIs.
 - [r3pcomms](https://github.com/greyltc/r3pcomms), by M. Greyson Christoforo, documents USB HID/CDC telemetry framing and is MIT licensed. Its notice is included in `Resources/ThirdPartyNotices.txt`.
-- The official [NUT EcoFlow support discussion](https://github.com/networkupstools/nut/issues/2735) provides DELTA 3 Plus HID mapping verification. The [NUT EcoFlow driver](https://github.com/networkupstools/nut/blob/master/drivers/ecoflow-hid.c) and [CDC documentation](https://networkupstools.org/docs/man/usbhid-ups.html) corroborate the measurements. No NUT binaries, libraries or source code are included in EcoFlow Cat.
+- The official [NUT EcoFlow support discussion](https://github.com/networkupstools/nut/issues/2735) provides DELTA 3 Plus HID mapping verification. The [NUT EcoFlow driver](https://github.com/networkupstools/nut/blob/master/drivers/ecoflow-hid.c) and [CDC documentation](https://networkupstools.org/docs/man/usbhid-ups.html) corroborate the measurements. No NUT binaries, libraries or source code are included in Nacho Power.

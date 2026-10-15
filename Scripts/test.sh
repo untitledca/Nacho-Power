@@ -38,3 +38,6 @@ xcrun swiftc -parse-as-library -swift-version 5 \
 
 xcrun swiftc -parse-as-library -swift-version 5 "$PROJECT_DIR/Sources/EcoFlowAccountDiscovery.swift" "$PROJECT_DIR/Tests/EcoFlowAccountDiscoveryChecks.swift" -o "$PROJECT_DIR/.build/account-discovery-checks"
 "$PROJECT_DIR/.build/account-discovery-checks"
+
+xcrun swiftc -parse-as-library -swift-version 5 "$PROJECT_DIR/Sources/AppUpdateChecker.swift" "$PROJECT_DIR/Tests/AppUpdateChecks.swift" -o "$PROJECT_DIR/.build/app-update-checks"
+"$PROJECT_DIR/.build/app-update-checks"

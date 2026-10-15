@@ -88,7 +88,7 @@ final class CatOverlayController {
         panel = CatOverlayPanel(contentRect: .zero,
                                 styleMask: [.borderless, .nonactivatingPanel],
                                 backing: .buffered, defer: false)
-        panel.title = "EcoFlow Cat Overlay"
+        panel.title = "Nacho Power Overlay"
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false

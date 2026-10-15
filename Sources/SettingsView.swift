@@ -5,6 +5,7 @@ private let accent = Color(red: 0.40, green: 0.31, blue: 0.65)
 
 struct SettingsView: View {
     @ObservedObject var model: AppModel
+    @ObservedObject var updates: AppUpdateChecker
     @State private var accountEmail = ""
     @State private var accountPassword = ""
 
@@ -12,12 +13,12 @@ struct SettingsView: View {
         ScrollView {
         VStack(alignment: .leading, spacing: 20) {
             HStack(spacing: 14) {
-                Image(nsImage: NSImage(named: "EcoFlowCatLogo") ?? NSImage())
+                Image(nsImage: NSImage(named: "NachoPowerLogo") ?? NSImage())
                     .resizable().scaledToFit()
                     .frame(width: 76, height: 76)
-                    .accessibilityLabel("EcoFlow Cat logo")
+                    .accessibilityLabel("Nacho Power logo")
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("EcoFlow Cat").font(.system(size: 24, weight: .semibold))
+                    Text("Nacho Power").font(.system(size: 24, weight: .semibold))
                     Text("A little reminder to plug back in.")
                         .foregroundStyle(.secondary)
                 }
@@ -129,6 +130,11 @@ struct SettingsView: View {
                         .buttonStyle(.borderedProminent).tint(accent).foregroundStyle(.white).controlSize(.large)
                 }
             }
+
+            Divider()
+            AppUpdateSettingsView(updates: updates)
+            Divider()
+            SupportView()
         }
         .padding(26)
         .frame(width: 500)

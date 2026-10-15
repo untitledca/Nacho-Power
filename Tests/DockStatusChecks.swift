@@ -31,7 +31,7 @@ struct DockStatusChecks {
         if let previewPath = CommandLine.arguments.dropFirst().first {
             let folder = URL(fileURLWithPath: previewPath, isDirectory: true)
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            let logo = NSImage(contentsOfFile: "Resources/EcoFlowCatLogo.png")
+            let logo = NSImage(contentsOfFile: "Resources/NachoPowerLogo.png")
             let previews = [("ac-connected", status(78, ac: true)),
                             ("ac-disconnected", status(78, ac: false)),
                             ("unavailable", status(nil, ac: nil)),
