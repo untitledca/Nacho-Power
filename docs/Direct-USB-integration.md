@@ -1,6 +1,6 @@
 # Direct EcoFlow USB monitoring
 
-EcoFlow Cat now reads the power station directly through native macOS USB and serial APIs. It does not require PowerManager, NUT, Homebrew, Python, a cloud account, internet access, or installed third-party drivers. Connect one supported EcoFlow by USB and quit PowerManager before opening EcoFlow Cat.
+EcoFlow Cat’s USB mode reads the power station directly through native macOS USB and serial APIs. It does not require PowerManager, NUT, Homebrew, Python, a cloud account, internet access, or installed third-party drivers. Connect one supported EcoFlow by USB and quit PowerManager before opening EcoFlow Cat.
 
 ## Read-only implementation
 
@@ -16,18 +16,19 @@ Native `IOHIDManager` enumeration returned no EcoFlow devices on this Mac. Direc
 
 The protocol can report both combined input and a dedicated AC-input measurement. The physical telemetry model keeps these separate; missing AC-only watts remain unknown.
 
-The DELTA 3 Plus firmware tested here returns combined input but omits the dedicated AC-input segment. Therefore reminder decisions combine the verified USB AC-present flag with fresh combined input, matching the user's original PowerManager-display rule:
+The DELTA 3 Plus firmware previously tested here returns combined input but omits the dedicated AC-input segment. The current reminder uses the verified USB AC-present flag directly:
 
-- AC absent: the unplug condition is confirmed from `ACPresent`, independently of solar input.
-- AC present with positive input: the outro condition is confirmed.
-- AC present with zero input: an active reminder continues until input becomes positive.
-- Unknown/disconnected data: no unplug event or AC-restored event is inferred.
+- AC absent: `ACPresent` starts the intro/loop reminder, subject to the selected battery threshold, independently of solar input.
+- AC present: the cat stops immediately with a short pop, including when input is 0 W because the battery is full.
+- Unknown/disconnected data: no unplug event or AC-restored event is inferred. A visible reminder expires after the telemetry grace period.
+
+The Dock uses the same AC flag: green for connected, red for disconnected, and an unknown state when a reliable reading is unavailable. Input wattage remains informational and is not required to recognize a fresh, explicit AC flag.
 
 The app labels the numeric measurement **Input power**. Solar or another source can contribute to that combined value while AC is connected. It does not claim to measure exclusively AC watts when the station does not expose that field.
 
-## Hardware verification
+## Prior USB hardware verification
 
-The DELTA 3 Plus was physically verified with AC unplugged and plugged in while PowerManager's GUI and NUT processes were closed. Consecutive direct snapshots correctly reported AC absent with zero input, then AC present with positive input. Dedicated AC segment 9 was absent; combined input was reported through segment 8. No power settings or hardware outputs were changed.
+The USB implementation was previously physically verified on DELTA 3 Plus with AC unplugged and plugged in while PowerManager's GUI and NUT processes were closed. Consecutive direct snapshots correctly reported AC absent with zero input, then AC present with positive input. Dedicated AC segment 9 was absent; combined input was reported through segment 8. No power settings or hardware outputs were changed.
 
 The native direct monitor and parser tests compile for both Apple silicon and Intel with the macOS 14 deployment target. Actual Intel execution and other EcoFlow model/firmware combinations have not been tested. The current USB support is intended for EcoFlow models exposing the HID/CDC UPS interface, including the DELTA 3 Plus tested here. A real AC plug transition should be checked before treating another model or firmware as verified.
 

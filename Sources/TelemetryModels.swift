@@ -1,6 +1,6 @@
 import Foundation
 
-/// A read-only observation of an EcoFlow attached directly by USB.
+/// A read-only observation of an EcoFlow over USB, Bluetooth, or Wi-Fi cloud.
 /// `nil` means unknown, never an implicit zero or an unplug event.
 struct PowerTelemetry: Sendable {
     let deviceName: String
@@ -11,11 +11,11 @@ struct PowerTelemetry: Sendable {
     let totalInputWatts: Double?
     let acConnected: Bool?
     let sourceDescription: String
-    /// Timestamp of this USB observation, used for freshness and confirmation.
+    /// Timestamp of this source observation, used for freshness and confirmation.
     let timestamp: Date
 
-    /// AC presence is required before a positive input can finish a reminder.
-    /// Some firmware exposes only combined input, matching the original rule.
+    /// Watt-only fallback for older observations. An explicit AC presence flag
+    /// takes precedence in the reminder engine, even when input is zero.
     var reminderInputWatts: Double? {
         switch acConnected {
         case .some(false): return 0

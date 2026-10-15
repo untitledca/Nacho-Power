@@ -21,9 +21,9 @@ enum ReminderTrigger: Equatable {
 
 enum ReminderCommand: Equatable {
     case none
-    /// Play the intro once, then loop the middle clip.
+    /// Play the intro once, then repeat loop.mov.
     case start
-    /// Stop the reminder loop and play the outro once.
+    /// Stop playback immediately and dismiss with a short pop animation.
     case finish
     /// Hide immediately; loss of telemetry does not mean AC was restored.
     case cancel
@@ -32,11 +32,11 @@ enum ReminderCommand: Equatable {
 enum ReminderPhase: Equatable {
     case idle
     case active
-    case outro
+    case dismissing
 }
 
 /// Pure reminder policy. The caller supplies timestamps in seconds from one
-/// consistent clock and tells the engine when the outro finishes.
+/// consistent clock and tells the engine when the dismissal finishes.
 struct ReminderEngine {
     private(set) var phase: ReminderPhase = .idle
     private(set) var enabled: Bool
@@ -46,13 +46,13 @@ struct ReminderEngine {
 
     private var lastAcceptedAt: TimeInterval?
     private var lastValidACAt: TimeInterval?
-    private var consecutiveZero = 0
-    private var consecutivePositive = 0
+    private var consecutiveDisconnected = 0
+    private var consecutiveConnected = 0
     private let requiredConsecutiveReadings = 2
 
     init(
         enabled: Bool = true,
-        trigger: ReminderTrigger = .belowBattery(50),
+        trigger: ReminderTrigger = .immediate,
         staleGrace: TimeInterval = 30
     ) {
         self.enabled = enabled
@@ -73,27 +73,29 @@ struct ReminderEngine {
 
         let expiration = expireTelemetry(at: timestamp)
 
-        guard let watts = sample.acInputWatts, watts.isFinite, watts >= 0 else {
-            consecutiveZero = 0
-            consecutivePositive = 0
-            return expiration
-        }
-
-        lastValidACAt = timestamp
-        if watts == 0 && sample.acConnected == true {
-            // Connected with known zero input is live telemetry. It cannot
-            // start an outage reminder or satisfy positive-input restoration,
-            // but it keeps an already active reminder latched.
-            consecutiveZero = 0
-            consecutivePositive = 0
-            return expiration
-        }
-        if watts == 0 {
-            consecutiveZero = min(consecutiveZero + 1, requiredConsecutiveReadings)
-            consecutivePositive = 0
+        // A device's explicit AC state is authoritative even when its battery is
+        // full and AC input is 0 W, or when a transport omits the wattage field.
+        // Wattage-only transports still need two readings to reject brief noise.
+        let connected: Bool
+        let requiredReadings: Int
+        if let acConnected = sample.acConnected {
+            connected = acConnected
+            requiredReadings = 1
+        } else if let watts = sample.acInputWatts, watts.isFinite, watts >= 0 {
+            connected = watts > 0
+            requiredReadings = requiredConsecutiveReadings
         } else {
-            consecutivePositive = min(consecutivePositive + 1, requiredConsecutiveReadings)
-            consecutiveZero = 0
+            consecutiveDisconnected = 0
+            consecutiveConnected = 0
+            return expiration
+        }
+        lastValidACAt = timestamp
+        if connected {
+            consecutiveConnected = min(consecutiveConnected + 1, requiredConsecutiveReadings)
+            consecutiveDisconnected = 0
+        } else {
+            consecutiveDisconnected = min(consecutiveDisconnected + 1, requiredConsecutiveReadings)
+            consecutiveConnected = 0
         }
 
         // An expired reminder is hidden even if this poll brings telemetry back.
@@ -102,7 +104,7 @@ struct ReminderEngine {
 
         switch phase {
         case .idle:
-            guard consecutiveZero >= requiredConsecutiveReadings,
+            guard consecutiveDisconnected >= requiredReadings,
                   shouldStart(batteryPercentage: sample.batteryPercentage) else {
                 return .none
             }
@@ -110,13 +112,13 @@ struct ReminderEngine {
             return .start
         case .active:
             // Once started, changing battery level or trigger settings never
-            // stops the reminder. Confirmed positive AC input ends it.
-            guard consecutivePositive >= requiredConsecutiveReadings else {
+            // stops the reminder. Confirmed AC connection ends it, including at 0 W.
+            guard consecutiveConnected >= requiredReadings else {
                 return .none
             }
-            phase = .outro
+            phase = .dismissing
             return .finish
-        case .outro:
+        case .dismissing:
             return .none
         }
     }
@@ -132,7 +134,7 @@ struct ReminderEngine {
     }
 
     /// Trigger changes take effect on the next reading. Disabling immediately
-    /// hides either the reminder loop or an in-progress outro.
+    /// hides either the reminder loop or an in-progress pop animation.
     mutating func updateSettings(
         enabled: Bool,
         trigger: ReminderTrigger,
@@ -150,9 +152,9 @@ struct ReminderEngine {
         return tick(at: timestamp)
     }
 
-    /// Start a new confirmation cycle after the outro has actually disappeared.
-    mutating func outroDidFinish() {
-        guard phase == .outro else { return }
+    /// Start a new confirmation cycle after the pop animation has disappeared.
+    mutating func dismissalDidFinish() {
+        guard phase == .dismissing else { return }
         phase = .idle
         resetObservations()
     }
@@ -190,16 +192,16 @@ struct ReminderEngine {
         // Keep lastAcceptedAt so duplicate delivery stays rejected. Only the
         // observations used for AC confirmation expire here.
         self.lastValidACAt = nil
-        consecutiveZero = 0
-        consecutivePositive = 0
+        consecutiveDisconnected = 0
+        consecutiveConnected = 0
         return wasVisible ? .cancel : .none
     }
 
     private mutating func resetObservations() {
         lastAcceptedAt = nil
         lastValidACAt = nil
-        consecutiveZero = 0
-        consecutivePositive = 0
+        consecutiveDisconnected = 0
+        consecutiveConnected = 0
     }
 
     private static func normalized(_ trigger: ReminderTrigger) -> ReminderTrigger {

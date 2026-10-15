@@ -7,11 +7,11 @@ import VideoToolbox
     static func main() async throws {
         let folder = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        for name in ["intro", "middle", "outro"] {
+        for name in ["intro", "loop"] {
             let url = folder.appendingPathComponent("\(name).mov")
             if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
             let width = 640, height = 360, fps = 24
-            let frames = name == "middle" ? 24 : 48
+            let frames = name == "loop" ? 24 : 48
             let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
             let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
                 AVVideoCodecKey: AVVideoCodecType.hevcWithAlpha,
@@ -41,8 +41,8 @@ import VideoToolbox
                                         bitmapInfo: CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.premultipliedFirst.rawValue)!
                 context.clear(CGRect(x: 0, y: 0, width: width, height: height))
                 let progress = Double(frame) / Double(frames - 1)
-                let scale = name == "intro" ? progress : name == "outro" ? (1 - progress) : 1
-                let bob = name == "middle" ? sin(Double(frame) / Double(frames) * 2 * .pi) * 15 : 0
+                let scale = name == "intro" ? progress : 1
+                let bob = name == "loop" ? sin(Double(frame) / Double(frames) * 2 * .pi) * 15 : 0
                 let radius = 100 * scale
                 context.setFillColor(NSColor.systemPurple.cgColor)
                 context.fillEllipse(in: CGRect(x: 320 - radius, y: 180 - radius + bob, width: 2 * radius, height: 2 * radius))

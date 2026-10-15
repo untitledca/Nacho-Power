@@ -34,7 +34,8 @@ private enum ReminderEngineTests {
             ("old observations and duplicate deliveries cannot confirm AC", testOldAndDuplicateReadings),
             ("settings changes and disabling", testSettings),
             ("explicit cancellation and safe reset", testCancellation),
-            ("connected with zero input holds active until positive input", testConnectedZeroInput),
+            ("explicit AC state starts and stops even with zero or missing watts", testConnectedZeroInput),
+            ("immediate default and authoritative AC status", testExplicitACState),
         ]
         var failures = 0
         for (name, test) in tests {
@@ -51,7 +52,7 @@ private enum ReminderEngineTests {
     }
 
     private static func testThresholdAndPlaybackCycle() throws {
-        var engine = ReminderEngine()
+        var engine = ReminderEngine(trigger: .belowBattery(50))
         try expect(engine.ingest(reading(0, 60), at: 0), .none, "first off-AC sample")
         try expect(engine.ingest(reading(0, 50), at: 2), .none, "50% is not below 50%")
         try expect(engine.ingest(reading(0, 49), at: 4), .start, "crossing threshold starts intro")
@@ -59,11 +60,11 @@ private enum ReminderEngineTests {
         try expect(engine.ingest(reading(0, 70), at: 6), .none, "battery change cannot stop reminder")
         try expect(engine.ingest(reading(0, 20), at: 8), .none, "intro is not repeated")
         try expect(engine.ingest(reading(200), at: 10), .none, "first positive AC sample")
-        try expect(engine.ingest(reading(150), at: 12), .finish, "confirmed positive input plays outro")
-        try expect(engine.phase, .outro, "outro phase")
-        try expect(engine.ingest(reading(100), at: 14), .none, "outro not repeated")
-        engine.outroDidFinish()
-        try expect(engine.phase, .idle, "outro completion resets")
+        try expect(engine.ingest(reading(150), at: 12), .finish, "confirmed positive input plays pop animation")
+        try expect(engine.phase, .dismissing, "pop animation phase")
+        try expect(engine.ingest(reading(100), at: 14), .none, "pop animation not repeated")
+        engine.dismissalDidFinish()
+        try expect(engine.phase, .idle, "pop animation completion resets")
         try expect(engine.ingest(reading(0), at: 16), .none, "new outage needs first confirmation")
         try expect(engine.ingest(reading(0), at: 18), .start, "new outage starts new intro")
     }
@@ -94,7 +95,7 @@ private enum ReminderEngineTests {
     }
 
     private static func testInvalidReadings() throws {
-        var engine = ReminderEngine()
+        var engine = ReminderEngine(trigger: .belowBattery(50))
         let batteries: [Double?] = [nil, .nan, .infinity, -1, 101]
         for (index, battery) in batteries.enumerated() {
             try expect(engine.ingest(reading(0, battery), at: Double(index * 2)), .none, "invalid battery \(index)")
@@ -113,14 +114,14 @@ private enum ReminderEngineTests {
         try expect(engine.ingest(reading(0), at: 2), .start, "start before telemetry gap")
         try expect(engine.ingest(reading(nil), at: 10), .none, "brief unknown keeps overlay")
         try expect(engine.ingest(reading(nil), at: 31.9), .none, "grace lasts 30 seconds from last valid AC")
-        try expect(engine.ingest(reading(nil), at: 32), .cancel, "expiry hides without outro")
+        try expect(engine.ingest(reading(nil), at: 32), .cancel, "expiry hides without pop animation")
         try expect(engine.phase, .idle, "expired phase")
         try expect(engine.ingest(reading(nil), at: 34), .none, "expiry cancellation occurs once")
         try expect(engine.ingest(reading(0), at: 36), .none, "recovery needs fresh confirmation")
         try expect(engine.ingest(reading(0), at: 38), .start, "confirmed recovery starts again")
         try expect(engine.ingest(reading(150), at: 40), .none, "restore AC first sample")
         try expect(engine.ingest(reading(150), at: 42), .finish, "restore AC second sample")
-        try expect(engine.tick(at: 72), .cancel, "stale outro also hides")
+        try expect(engine.tick(at: 72), .cancel, "stale pop animation also hides")
     }
 
     private static func testStalledPolling() throws {
@@ -135,7 +136,7 @@ private enum ReminderEngineTests {
         _ = returnsAtExpiry.ingest(reading(0), at: 0)
         _ = returnsAtExpiry.ingest(reading(0), at: 2)
         try expect(returnsAtExpiry.ingest(reading(200), at: 32), .cancel, "late recovery hides expired reminder")
-        try expect(returnsAtExpiry.ingest(reading(200), at: 34), .none, "late recovery cannot falsely play outro")
+        try expect(returnsAtExpiry.ingest(reading(200), at: 34), .none, "late recovery cannot falsely play pop animation")
     }
 
     private static func testOldAndDuplicateReadings() throws {
@@ -152,7 +153,7 @@ private enum ReminderEngineTests {
     }
 
     private static func testSettings() throws {
-        var engine = ReminderEngine()
+        var engine = ReminderEngine(trigger: .belowBattery(50))
         _ = engine.ingest(reading(0, 80), at: 0)
         _ = engine.ingest(reading(0, 80), at: 2)
         try expect(engine.updateSettings(enabled: true, trigger: .immediate, at: 3), .none, "settings wait for next poll")
@@ -167,7 +168,7 @@ private enum ReminderEngineTests {
         try expect(engine.ingest(reading(0), at: 12), .start, "fresh second observation")
         _ = engine.ingest(reading(100), at: 14)
         _ = engine.ingest(reading(100), at: 16)
-        try expect(engine.updateSettings(enabled: false, trigger: .immediate, at: 17), .cancel, "disable cancels outro")
+        try expect(engine.updateSettings(enabled: false, trigger: .immediate, at: 17), .cancel, "disable cancels pop animation")
     }
 
     private static func testCancellation() throws {
@@ -175,7 +176,7 @@ private enum ReminderEngineTests {
         try expect(engine.cancel(), .none, "idle cancel has no visible effect")
         _ = engine.ingest(reading(0), at: 0)
         _ = engine.ingest(reading(0), at: 2)
-        engine.outroDidFinish()
+        engine.dismissalDidFinish()
         try expect(engine.phase, .active, "unrelated completion cannot clear active reminder")
         try expect(engine.cancel(), .cancel, "quit or source change cancels")
         try expect(engine.cancel(), .none, "cancellation is idempotent")
@@ -190,21 +191,29 @@ private enum ReminderEngineTests {
             try expect(engine.ingest(reading(0, acConnected: true), at: timestamp), .none, "connected zero-input startup")
         }
         try expect(engine.phase, .idle, "connected zero cannot start an outage reminder")
-        try expect(engine.ingest(reading(0, acConnected: false), at: 42), .none, "first disconnected reading")
-        try expect(engine.ingest(reading(0, acConnected: false), at: 44), .start, "confirmed disconnection starts")
-        for timestamp in stride(from: 46.0, through: 86.0, by: 2.0) {
-            try expect(engine.ingest(reading(0, acConnected: true), at: timestamp), .none, "connected zero-input keeps active beyond grace")
-            try expect(engine.tick(at: timestamp), .none, "connected zero-input is fresh telemetry")
-        }
-        try expect(engine.phase, .active, "positive input still required to stop loop")
-        try expect(engine.ingest(reading(150, acConnected: true), at: 88), .none, "first positive reading")
-        try expect(engine.ingest(reading(0, acConnected: true), at: 90), .none, "connected zero breaks positive confirmation")
-        try expect(engine.ingest(reading(150, acConnected: true), at: 92), .none, "fresh first positive reading")
-        try expect(engine.ingest(reading(150, acConnected: true), at: 94), .finish, "two positive readings play outro")
+        try expect(engine.ingest(reading(0, acConnected: false), at: 42), .start, "explicit disconnection starts immediately")
+        try expect(engine.ingest(reading(0, acConnected: true), at: 44), .finish, "reconnection at 0 W dismisses immediately")
+        try expect(engine.phase, .dismissing, "pop begins immediately")
+        engine.dismissalDidFinish()
+        try expect(engine.phase, .idle, "pop completion resets")
+        try expect(engine.ingest(reading(nil, acConnected: false), at: 46), .start, "explicit disconnect does not need watts")
+        try expect(engine.ingest(reading(nil, acConnected: true), at: 48), .finish, "explicit reconnect does not need watts")
+    }
 
-        var missingWatts = ReminderEngine(trigger: .immediate)
-        _ = missingWatts.ingest(reading(0, acConnected: false), at: 0)
-        _ = missingWatts.ingest(reading(0, acConnected: false), at: 2)
-        try expect(missingWatts.ingest(reading(nil, acConnected: true), at: 32), .cancel, "connected status alone cannot invent a fresh watts value")
+    private static func testExplicitACState() throws {
+        var engine = ReminderEngine()
+        try expect(engine.trigger, .immediate, "default responds to AC loss at any battery percentage")
+        try expect(engine.ingest(reading(150, 100, acConnected: false), at: 0), .start, "explicit AC state wins over lagging wattage")
+        try expect(engine.ingest(reading(.nan, nil, acConnected: false), at: 20), .none, "explicit state remains valid with invalid watts")
+        try expect(engine.tick(at: 35), .none, "AC state refreshes telemetry grace")
+        try expect(engine.ingest(reading(0, nil, acConnected: true), at: 36), .finish, "immediate reconnect despite full battery or missing charge percentage")
+        try expect(engine.ingest(reading(0, nil, acConnected: true), at: 38), .none, "reconnection cannot repeat the pop")
+        engine.dismissalDidFinish()
+        try expect(engine.ingest(reading(nil, nil, acConnected: false), at: 40), .start, "a second outage restarts intro")
+
+        var threshold = ReminderEngine(trigger: .belowBattery(50))
+        try expect(threshold.ingest(reading(nil, 80, acConnected: false), at: 0), .none, "saved optional threshold is respected")
+        try expect(threshold.ingest(reading(nil, 49, acConnected: false), at: 2), .start, "explicit disconnect starts below threshold")
+        try expect(threshold.ingest(reading(nil, 100, acConnected: true), at: 4), .finish, "threshold never blocks reconnection dismissal")
     }
 }

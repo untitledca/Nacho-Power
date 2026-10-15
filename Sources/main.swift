@@ -8,9 +8,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var settingsWindow: NSWindow?
     private var observers: [NSObjectProtocol] = []
     private var menuIsOpen = false
+    private var dockLogo: NSImage?
+    private var lastDockStatus: DockPowerStatus?
+    private var dockRefreshTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApplication.shared.setActivationPolicy(.accessory)
+        NSApplication.shared.setActivationPolicy(.regular)
         let mainMenu = NSMenu()
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu()
@@ -24,22 +27,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let logoURL = Bundle.main.url(forResource: "EcoFlowCatLogo", withExtension: "png"),
            let logo = NSImage(contentsOf: logoURL) {
-            logo.size = NSSize(width: 22, height: 22)
-            logo.isTemplate = false
-            statusItem.button?.image = logo
-        } else {
-            statusItem.button?.image = NSImage(systemSymbolName: "pawprint.fill", accessibilityDescription: "EcoFlow Cat")
-            statusItem.button?.image?.isTemplate = true
+            dockLogo = logo
         }
         statusItem.button?.setAccessibilityLabel("EcoFlow Cat")
         statusItem.menu = NSMenu()
         statusItem.menu?.delegate = self
         model.onStatusChanged = { [weak self] in
             guard let self else { return }
-            statusItem.button?.toolTip = "EcoFlow Cat · \(model.phaseDescription)"
+            updatePowerIndicators()
             if !menuIsOpen { updateMenu() }
         }
+        updatePowerIndicators()
         updateMenu()
+        // A stalled transport must not leave an old green/red percentage in
+        // the Dock indefinitely. Rendering is cached until the state changes.
+        dockRefreshTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.updatePowerIndicators() }
+        }
         model.startMonitoring()
         observers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.model.suspend() }
@@ -54,7 +58,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if CommandLine.arguments.contains("--preview") { model.previewCat() }
     }
 
-    func applicationWillTerminate(_ notification: Notification) { model?.stop() }
+    func applicationWillTerminate(_ notification: Notification) {
+        dockRefreshTimer?.invalidate()
+        model?.stop()
+    }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         showSettings()
         return true
@@ -70,7 +78,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if model.isConnected {
             addDisabled("Battery \(model.batteryText)   ·   Input \(model.inputText)", to: menu)
         }
-        statusItem.button?.toolTip = "EcoFlow Cat · \(model.phaseDescription)"
         menu.addItem(.separator())
         let enabled = NSMenuItem(title: "Enable reminders", action: #selector(toggleEnabled), keyEquivalent: "")
         enabled.state = model.enabled ? .on : .off
@@ -86,6 +93,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let quit = NSMenuItem(title: "Quit EcoFlow Cat", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
+    }
+
+    private func updatePowerIndicators() {
+        guard let model else { return }
+        let status = DockPowerStatus(telemetry: model.telemetry, isConnected: model.isConnected)
+        statusItem.button?.toolTip = "\(status.accessibilityDescription) · \(model.phaseDescription)"
+        statusItem.button?.setAccessibilityLabel(status.accessibilityDescription)
+        guard status != lastDockStatus else { return }
+        lastDockStatus = status
+        NSApplication.shared.applicationIconImage = DockStatusIcon.image(for: status, logo: dockLogo)
+        NSApplication.shared.dockTile.display()
+        statusItem.button?.image = DockStatusIcon.menuBarImage(for: status)
+        statusItem.button?.attributedTitle = NSAttributedString(string: " \(status.percentageText)", attributes: [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold),
+            .foregroundColor: DockStatusIcon.color(for: status.acState)
+        ])
+        statusItem.button?.imagePosition = .imageLeading
     }
 
     private func addDisabled(_ title: String, to menu: NSMenu) {

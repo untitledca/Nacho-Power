@@ -1,1 +1,71 @@
-{"warnings":[],"validForTransparentOverlay":true,"videos":[{"height":720,"samples":[{"minimumAlpha":0,"maximumAlpha":6208,"transparentFraction":0.96685872395833339,"time":0,"cornerAlpha":0},{"minimumAlpha":0,"maximumAlpha":65535,"transparentFraction":0.8747450086805556,"time":5,"cornerAlpha":0},{"minimumAlpha":0,"maximumAlpha":65535,"transparentFraction":0.85493489583333337,"time":9.9583333333333339,"cornerAlpha":0}],"alphaMetadata":true,"frameRate":24,"file":"intro.mov","width":1280,"seconds":10},{"height":720,"samples":[{"minimumAlpha":0,"maximumAlpha":65535,"transparentFraction":0.8258962673611111,"time":0,"cornerAlpha":0},{"minimumAlpha":0,"maximumAlpha":65535,"transparentFraction":0.82699435763888884,"time":2.2083333333333335,"cornerAlpha":0},{"minimumAlpha":0,"maximumAlpha":65535,"transparentFraction":0.86412543402777775,"time":4.375,"cornerAlpha":0}],"alphaMetadata":true,"frameRate":24,"file":"middle.mov","width":1280,"seconds":4.416666666666667},{"height":720,"samples":[{"minimumAlpha":0,"maximumAlpha":65535,"transparentFraction":0.8258962673611111,"time":0,"cornerAlpha":0},{"minimumAlpha":0,"maximumAlpha":65535,"transparentFraction":0.86301974826388894,"time":5,"cornerAlpha":0},{"minimumAlpha":0,"maximumAlpha":4075,"transparentFraction":0.95872287326388894,"time":9.9583333333333339,"cornerAlpha":0}],"alphaMetadata":true,"frameRate":24,"file":"outro.mov","width":1280,"seconds":10}],"generatedAt":"2026-10-13T18:19:48Z"}
+{
+  "generatedAt" : "2026-10-15T02:33:45Z",
+  "validForTransparentOverlay" : true,
+  "videos" : [
+    {
+      "alphaMetadata" : true,
+      "file" : "intro.mov",
+      "frameRate" : 24,
+      "height" : 1080,
+      "samples" : [
+        {
+          "cornerAlpha" : 0,
+          "maximumAlpha" : 0,
+          "minimumAlpha" : 0,
+          "time" : 0,
+          "transparentFraction" : 1
+        },
+        {
+          "cornerAlpha" : 0,
+          "maximumAlpha" : 65535,
+          "minimumAlpha" : 0,
+          "time" : 10,
+          "transparentFraction" : 0.8693441358024692
+        },
+        {
+          "cornerAlpha" : 0,
+          "maximumAlpha" : 65535,
+          "minimumAlpha" : 0,
+          "time" : 19.958333333333332,
+          "transparentFraction" : 0.8676374421296297
+        }
+      ],
+      "seconds" : 20,
+      "width" : 1920
+    },
+    {
+      "alphaMetadata" : true,
+      "file" : "loop.mov",
+      "frameRate" : 24,
+      "height" : 1080,
+      "samples" : [
+        {
+          "cornerAlpha" : 0,
+          "maximumAlpha" : 65535,
+          "minimumAlpha" : 0,
+          "time" : 0,
+          "transparentFraction" : 0.8677015817901235
+        },
+        {
+          "cornerAlpha" : 0,
+          "maximumAlpha" : 65535,
+          "minimumAlpha" : 0,
+          "time" : 8.3125,
+          "transparentFraction" : 0.8676533564814815
+        },
+        {
+          "cornerAlpha" : 0,
+          "maximumAlpha" : 65535,
+          "minimumAlpha" : 0,
+          "time" : 16.583333333333332,
+          "transparentFraction" : 0.8675352044753086
+        }
+      ],
+      "seconds" : 16.625,
+      "width" : 1920
+    }
+  ],
+  "warnings" : [
+
+  ]
+}

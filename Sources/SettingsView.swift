@@ -5,8 +5,11 @@ private let accent = Color(red: 0.40, green: 0.31, blue: 0.65)
 
 struct SettingsView: View {
     @ObservedObject var model: AppModel
+    @State private var accountEmail = ""
+    @State private var accountPassword = ""
 
     var body: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 20) {
             HStack(spacing: 14) {
                 Image(nsImage: NSImage(named: "EcoFlowCatLogo") ?? NSImage())
@@ -24,7 +27,7 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 13) {
                 HStack {
                     Circle().fill(model.isConnected ? Color.green : Color.orange).frame(width: 7, height: 7)
-                    Text(model.telemetry?.deviceName ?? "Connect your EcoFlow by USB").font(.system(size: 13, weight: .semibold))
+                    Text(model.telemetry?.deviceName ?? "Connect your EcoFlow").font(.system(size: 13, weight: .semibold))
                     Spacer()
                     Button { model.refreshNow() } label: { Image(systemName: "arrow.clockwise") }
                         .buttonStyle(.borderless).help("Refresh power status")
@@ -34,10 +37,15 @@ struct SettingsView: View {
                     metric(model.inputText, label: "INPUT POWER", symbol: "bolt.fill")
                 }
                 Text(model.powerText).font(.system(size: 12)).foregroundStyle(.secondary)
+                if let source = model.telemetry?.sourceDescription {
+                    Text(source).font(.system(size: 11)).foregroundStyle(.secondary)
+                }
                 if let error = model.connectionError {
                     Text(error).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }.padding(18).background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
+
+            connectionSettings
 
             VStack(alignment: .leading, spacing: 14) {
                 Toggle("Enable reminders", isOn: $model.enabled)
@@ -55,7 +63,7 @@ struct SettingsView: View {
                     }
                 }
                 Text(model.conditionText).font(.system(size: 12)).foregroundStyle(.secondary)
-                Text("The intro plays once, the middle repeats, and positive AC input starts the outro.")
+                Text("The intro plays once, the loop repeats, and reconnecting AC hides the cat with a pop.")
                     .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
 
@@ -124,8 +132,85 @@ struct SettingsView: View {
         }
         .padding(26)
         .frame(width: 500)
+        }
+        .frame(width: 500, height: 720)
         .background(Color(nsColor: .windowBackgroundColor))
         .tint(accent)
+    }
+
+    private var connectionSettings: some View {
+        DisclosureGroup("Connection settings") {
+            VStack(alignment: .leading, spacing: 12) {
+                Picker("Connect using", selection: $model.transport) {
+                    Text("Automatic").tag(EcoFlowTransport.automatic)
+                    Text("USB").tag(EcoFlowTransport.usb)
+                    Text("Bluetooth").tag(EcoFlowTransport.bluetooth)
+                    Text("Wi-Fi (cloud)").tag(EcoFlowTransport.wifi)
+                }
+                Text("Quit the EcoFlow app and PowerManager before connecting. Automatic tries USB, then Bluetooth, then configured Wi-Fi.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if model.transport == .bluetooth || model.transport == .automatic {
+                    Label(model.bluetoothSetupMessage, systemImage: model.bluetoothAccountReady ? "checkmark.circle.fill" : "person.crop.circle")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if !model.bluetoothAccountReady {
+                        Button(model.isFindingAccount ? "Finding your account…" : "Find existing EcoFlow sign-in") { model.findEcoFlowAccount() }
+                            .disabled(model.isFindingAccount)
+                    }
+                    DisclosureGroup(model.bluetoothAccountReady ? "Use another EcoFlow account" : "Sign in to enable Bluetooth") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            TextField("EcoFlow email", text: $accountEmail)
+                            SecureField("EcoFlow password", text: $accountPassword)
+                            Picker("Account region", selection: $model.cloudRegion) {
+                                Text("Global").tag(EcoFlowCloudRegion.global)
+                                Text("Europe").tag(EcoFlowCloudRegion.europe)
+                                Text("America").tag(EcoFlowCloudRegion.america)
+                            }
+                            Text("Sign in once with the account paired with your DELTA. After setup, Bluetooth connects automatically without Internet. Your password is never saved.")
+                                .font(.system(size: 11)).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Button(model.isSigningIn ? "Signing in…" : "Sign in for Bluetooth") {
+                                let password = accountPassword
+                                accountPassword = ""
+                                Task { await model.signInForBluetooth(email: accountEmail, password: password) }
+                            }.disabled(model.isSigningIn || accountEmail.isEmpty || accountPassword.isEmpty)
+                        }.padding(.top, 8)
+                    }
+                }
+                if model.transport == .bluetooth || model.transport == .automatic {
+                    DisclosureGroup("Choose a specific station (optional)") {
+                        TextField("Station serial number", text: $model.serialNumber)
+                            .help("Leave empty to discover your nearby DELTA automatically.")
+                    }
+                }
+                if model.transport == .wifi || model.transport == .automatic {
+                    DisclosureGroup("Wi-Fi cloud credentials") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Picker("Account region", selection: $model.cloudRegion) {
+                                Text("Global").tag(EcoFlowCloudRegion.global)
+                                Text("Europe").tag(EcoFlowCloudRegion.europe)
+                                Text("America").tag(EcoFlowCloudRegion.america)
+                            }
+                            TextField("Station serial number", text: $model.serialNumber)
+                            SecureField("EcoFlow developer access key", text: $model.cloudAccessKey)
+                            SecureField("EcoFlow developer secret key", text: $model.cloudSecretKey)
+                            Text("Requires your DELTA online through Wi-Fi, its serial number, and EcoFlow developer API credentials. Credentials are stored in this Mac’s Keychain.")
+                                .font(.system(size: 11)).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }.padding(.top, 8)
+                    }
+                }
+                HStack {
+                    if let message = model.connectionSettingsMessage {
+                        Text(message).font(.system(size: 11)).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                    Button("Save & connect") { model.saveConnectionSettings() }
+                }
+            }.textFieldStyle(.roundedBorder).padding(.top, 10)
+        }
     }
 
     private func metric(_ value: String, label: String, symbol: String) -> some View {

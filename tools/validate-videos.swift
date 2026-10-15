@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import CoreVideo
+import Darwin
 
 struct AlphaSample: Codable {
     let time: Double
@@ -21,17 +22,20 @@ struct VideoReport: Codable {
 }
 struct ValidationReport: Codable {
     let generatedAt: String
-    let sourceDirectory: String
     let validForTransparentOverlay: Bool
     let videos: [VideoReport]
     let warnings: [String]
 }
 @main struct ValidateVideos {
     static func main() async throws {
+        guard CommandLine.arguments.count == 3 else {
+            fputs("Usage: validate-videos INPUT_DIRECTORY OUTPUT_REPORT\n", stderr)
+            exit(2)
+        }
         let folder = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
         let output = URL(fileURLWithPath: CommandLine.arguments[2])
         var reports: [VideoReport] = []
-        for name in ["intro", "middle", "outro"] {
+        for name in ["intro", "loop"] {
             let asset = AVURLAsset(url: folder.appendingPathComponent("\(name).mov"))
             guard let track = try await asset.loadTracks(withMediaType: .video).first else {
                 throw NSError(domain: "EcoFlowCatValidation", code: 1, userInfo: [NSLocalizedDescriptionKey: "No video track in \(name).mov"])
@@ -39,6 +43,9 @@ struct ValidationReport: Codable {
             let size = try await track.load(.naturalSize)
             let rate = try await track.load(.nominalFrameRate)
             let duration = try await asset.load(.duration).seconds
+            guard duration.isFinite, duration > 0, rate.isFinite, rate > 0, size.width > 0, size.height > 0 else {
+                throw NSError(domain: "EcoFlowCatValidation", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid video dimensions or timing in \(name).mov"])
+            }
             let descriptions = try await track.load(.formatDescriptions)
             let alphaMetadata = descriptions.contains { format in
                 guard let raw = CMFormatDescriptionGetExtensions(format) else { return false }
@@ -76,18 +83,22 @@ struct ValidationReport: Codable {
                 reader.cancelReading()
             }
             let hasTransparentBackground = samples.contains { $0.transparentFraction > 0.10 }
-            let warning: String? = !alphaMetadata ? "\(name).mov has no alpha channel and has an opaque background." :
+            let hasVisibleContent = samples.contains { $0.maximumAlpha > 512 }
+            let warning: String? = samples.count != 3 ? "\(name).mov could not decode all validation samples." :
+                !hasVisibleContent ? "\(name).mov has no visible content in sampled frames." :
+                !alphaMetadata ? "\(name).mov has no alpha channel and has an opaque background." :
                 !hasTransparentBackground ? "\(name).mov has an alpha channel, but the sampled black background is opaque. Re-export with a transparent background." : nil
             reports.append(VideoReport(file: "\(name).mov", width: Int(size.width), height: Int(size.height), frameRate: rate,
                                        seconds: duration, alphaMetadata: alphaMetadata, samples: samples, warning: warning))
         }
         let warnings = reports.compactMap(\.warning)
-        let report = ValidationReport(generatedAt: ISO8601DateFormatter().string(from: Date()), sourceDirectory: folder.path,
+        let report = ValidationReport(generatedAt: ISO8601DateFormatter().string(from: Date()),
                                       validForTransparentOverlay: warnings.isEmpty, videos: reports, warnings: warnings)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         try encoder.encode(report).write(to: output, options: .atomic)
         for warning in warnings { print(warning) }
         print("Wrote \(output.path), transparent overlay valid: \(warnings.isEmpty)")
+        if !warnings.isEmpty { exit(1) }
     }
 }

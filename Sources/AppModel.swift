@@ -25,18 +25,29 @@ final class AppModel: ObservableObject {
     @Published var screenIndex: Int {
         didSet { defaults.set(screenIndex, forKey: "animationDisplay"); updateAppearance() }
     }
+    @Published var transport: EcoFlowTransport = .automatic
+    @Published var bluetoothUserID = ""
+    @Published var serialNumber = ""
+    @Published var cloudRegion: EcoFlowCloudRegion = .global
+    @Published var cloudAccessKey = ""
+    @Published var cloudSecretKey = ""
+    @Published private(set) var connectionSettingsMessage: String?
+    @Published private(set) var isSigningIn = false
+    @Published private(set) var isFindingAccount = false
+    @Published private(set) var bluetoothSetupMessage = "Checking for your existing EcoFlow sign-in…"
     @Published private(set) var telemetry: PowerTelemetry?
     @Published private(set) var connectionError: String?
     @Published private(set) var playbackError: String?
     @Published private(set) var assetWarning: String?
     @Published private(set) var isPreviewing = false
     @Published private(set) var isCatVisible = false
-    @Published private(set) var phaseDescription = "Checking EcoFlow USB…"
+    @Published private(set) var phaseDescription = "Checking EcoFlow connections…"
     @Published private(set) var lastSuccessfulRead: Date?
 
     var onStatusChanged: (() -> Void)?
     private let defaults: UserDefaults
-    private let monitor = DirectEcoFlowMonitor()
+    private let monitor = EcoFlowConnectionMonitor()
+    private var appliedConfiguration = EcoFlowConnectionConfiguration()
     private let overlay: CatOverlayController
     private var engine = ReminderEngine()
     private var pollingTask: Task<Void, Never>?
@@ -49,12 +60,18 @@ final class AppModel: ObservableObject {
     init(assetDirectory: URL, defaults: UserDefaults = .standard) {
         self.defaults = defaults
         defaults.register(defaults: ["remindersEnabled": true,
-                                     "immediateTrigger": false,
+                                     "immediateTrigger": true,
                                      "batteryThreshold": 50.0,
                                      "catWidth": 540.0,
                                      "fullScreenAnimation": true,
                                      "animationDisplay": 0,
                                      "catCorner": OverlayCorner.bottomRight.rawValue])
+        transport = EcoFlowTransport(rawValue: defaults.string(forKey: "connectionTransport") ?? "") ?? .automatic
+        bluetoothUserID = EcoFlowCredentialStore.read("bluetoothUserID")
+        serialNumber = defaults.string(forKey: "deviceSerialNumber") ?? ""
+        cloudRegion = EcoFlowCloudRegion(rawValue: defaults.string(forKey: "cloudRegion") ?? "") ?? .global
+        cloudAccessKey = EcoFlowCredentialStore.read("cloudAccessKey")
+        cloudSecretKey = EcoFlowCredentialStore.read("cloudSecretKey")
         enabled = defaults.bool(forKey: "remindersEnabled")
         immediate = defaults.bool(forKey: "immediateTrigger")
         threshold = min(100, max(1, defaults.double(forKey: "batteryThreshold")))
@@ -63,6 +80,7 @@ final class AppModel: ObservableObject {
         fullScreen = defaults.bool(forKey: "fullScreenAnimation")
         screenIndex = max(0, defaults.integer(forKey: "animationDisplay"))
         overlay = CatOverlayController(assetDirectory: assetDirectory)
+        appliedConfiguration = connectionConfiguration
         assetWarning = Self.readAssetWarning(in: assetDirectory)
         overlay.onPlaybackError = { [weak self] message in
             self?.playbackError = message
@@ -78,9 +96,9 @@ final class AppModel: ObservableObject {
             }
             refreshStatus()
         }
-        overlay.onOutroFinished = { [weak self] in
+        overlay.onDismissalFinished = { [weak self] in
             guard let self else { return }
-            engine.outroDidFinish()
+            engine.dismissalDidFinish()
             refreshStatus()
         }
         updateAppearance()
@@ -93,16 +111,17 @@ final class AppModel: ObservableObject {
         return watts.formatted(.number.precision(.fractionLength(0))) + " W"
     }
     var powerText: String {
-        guard connectionError == nil, let telemetry else { return "Waiting for an EcoFlow USB connection" }
+        guard connectionError == nil, let telemetry else { return "Waiting for an EcoFlow connection" }
         if telemetry.acConnected == false { return "On battery · AC disconnected" }
         if telemetry.acConnected == true,
            let watts = telemetry.acInputWatts ?? telemetry.totalInputWatts, watts > 0 {
             return "AC connected · input power detected"
         }
-        if telemetry.acConnected == true { return "AC connected · waiting for input" }
+        if telemetry.acConnected == true { return "AC connected · not drawing power" }
         return "AC status unavailable"
     }
     var isConnected: Bool { connectionError == nil && telemetry != nil }
+    var bluetoothAccountReady: Bool { !bluetoothUserID.isEmpty }
     var conditionText: String {
         immediate ? "Start when AC power is absent."
             : "Start when AC power is absent and battery is below \(Int(threshold.rounded()))%."
@@ -113,6 +132,7 @@ final class AppModel: ObservableObject {
         isStopped = false
         monitoringGeneration += 1
         pollingTask = Task { [weak self] in
+            await self?.prepareBluetoothAccount()
             while !Task.isCancelled {
                 guard let self, !self.isStopped else { break }
                 if !self.suspended { await self.poll() }
@@ -141,6 +161,7 @@ final class AppModel: ObservableObject {
         pollingTask = nil
         staleDataTask?.cancel()
         staleDataTask = nil
+        monitor.stop()
         _ = engine.cancel()
         overlay.hide()
     }
@@ -148,6 +169,10 @@ final class AppModel: ObservableObject {
     func suspend() {
         suspended = true
         monitoringGeneration += 1
+        monitor.stop()
+        telemetry = nil
+        connectionError = "Sleeping"
+        refreshStatus()
         _ = engine.cancel()
         overlay.hide()
     }
@@ -167,7 +192,7 @@ final class AppModel: ObservableObject {
         playbackError = nil
         overlay.preview()
         // preview() hides its previous panel first. Set this after those
-        // synchronous visibility callbacks, and keep it true through the outro.
+        // synchronous visibility callbacks, and keep it true through dismissal.
         isPreviewing = overlay.isVisible && playbackError == nil
         refreshStatus()
     }
@@ -175,7 +200,86 @@ final class AppModel: ObservableObject {
     func endPreview() {
         guard isPreviewing else { return }
         overlay.finishReminder()
-        phaseDescription = "Playing outro…"
+        phaseDescription = "Hiding cat…"
+    }
+
+    private var connectionConfiguration: EcoFlowConnectionConfiguration {
+        var configuration = EcoFlowConnectionConfiguration()
+        configuration.transport = transport
+        configuration.userID = bluetoothUserID.trimmingCharacters(in: .whitespacesAndNewlines)
+        configuration.serialNumber = serialNumber.trimmingCharacters(in: .whitespacesAndNewlines)
+        configuration.cloudRegion = cloudRegion
+        configuration.accessKey = cloudAccessKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        configuration.secretKey = cloudSecretKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        return configuration
+    }
+
+    func saveConnectionSettings() {
+        do {
+            try EcoFlowCredentialStore.write(bluetoothUserID.trimmingCharacters(in: .whitespacesAndNewlines), for: "bluetoothUserID")
+            try EcoFlowCredentialStore.write(cloudAccessKey.trimmingCharacters(in: .whitespacesAndNewlines), for: "cloudAccessKey")
+            try EcoFlowCredentialStore.write(cloudSecretKey.trimmingCharacters(in: .whitespacesAndNewlines), for: "cloudSecretKey")
+            defaults.set(transport.rawValue, forKey: "connectionTransport")
+            defaults.set(serialNumber.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "deviceSerialNumber")
+            defaults.set(cloudRegion.rawValue, forKey: "cloudRegion")
+            appliedConfiguration = connectionConfiguration
+            monitoringGeneration += 1
+            monitor.stop()
+            telemetry = nil
+            connectionError = "Connecting…"
+            _ = engine.cancel()
+            overlay.hide()
+            connectionSettingsMessage = "Saved. Checking your connection…"
+            refreshStatus()
+            refreshNow()
+        } catch {
+            connectionSettingsMessage = error.localizedDescription
+        }
+    }
+
+    private func prepareBluetoothAccount() async {
+        guard !isFindingAccount else { return }
+        if !bluetoothUserID.isEmpty {
+            bluetoothSetupMessage = "Your EcoFlow account is ready. Bluetooth reconnects automatically."
+            return
+        }
+        isFindingAccount = true
+        defer { isFindingAccount = false }
+        let identifier = await EcoFlowAccountDiscovery.discover()
+        guard !isStopped, !Task.isCancelled else { return }
+        guard bluetoothUserID.isEmpty else { return }
+        guard let identifier else {
+            bluetoothSetupMessage = "Sign in once below to enable automatic Bluetooth."
+            return
+        }
+        do {
+            try EcoFlowCredentialStore.write(identifier, for: "bluetoothUserID")
+            bluetoothUserID = identifier
+            appliedConfiguration.userID = identifier
+            bluetoothSetupMessage = "Found your EcoFlow sign-in. Bluetooth connects automatically."
+        } catch {
+            bluetoothSetupMessage = error.localizedDescription
+        }
+    }
+
+    func findEcoFlowAccount() {
+        Task { [weak self] in
+            await self?.prepareBluetoothAccount()
+            self?.refreshNow()
+        }
+    }
+
+    func signInForBluetooth(email: String, password: String) async {
+        guard !isSigningIn else { return }
+        isSigningIn = true
+        defer { isSigningIn = false }
+        do {
+            bluetoothUserID = try await EcoFlowAccount.signIn(email: email, password: password, region: cloudRegion)
+            bluetoothSetupMessage = "Signed in. Bluetooth reconnects automatically."
+            saveConnectionSettings()
+        } catch {
+            connectionSettingsMessage = error.localizedDescription
+        }
     }
 
     func refreshNow() {
@@ -211,7 +315,7 @@ final class AppModel: ObservableObject {
         let requestGeneration = monitoringGeneration
         defer { isPolling = false }
         do {
-            let reading = try await monitor.snapshot()
+            let reading = try await monitor.snapshot(configuration: appliedConfiguration)
             guard !isStopped, !suspended, !Task.isCancelled,
                   requestGeneration == monitoringGeneration else { return }
             telemetry = reading
@@ -250,9 +354,9 @@ final class AppModel: ObservableObject {
 
     private func refreshStatus() {
         if playbackError != nil { phaseDescription = "Video needs attention" }
-        else if isPreviewing { phaseDescription = "Previewing intro → loop → outro" }
+        else if isPreviewing { phaseDescription = "Previewing intro → loop → pop" }
         else if !enabled { phaseDescription = "Reminders paused" }
-        else if connectionError != nil { phaseDescription = "Waiting for EcoFlow USB" }
+        else if connectionError != nil { phaseDescription = "Waiting for EcoFlow" }
         else {
             switch engine.phase {
             case .idle:
@@ -260,7 +364,7 @@ final class AppModel: ObservableObject {
                     phaseDescription = "Waiting for battery below \(Int(threshold.rounded()))%"
                 } else { phaseDescription = "Monitoring power" }
             case .active: phaseDescription = "Cat reminder active"
-            case .outro: phaseDescription = "AC restored · playing outro"
+            case .dismissing: phaseDescription = "AC restored · hiding cat"
             }
         }
         onStatusChanged?()

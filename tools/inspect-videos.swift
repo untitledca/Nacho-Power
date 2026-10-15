@@ -1,7 +1,6 @@
 import Foundation
 import AppKit
 import AVFoundation
-import CoreImage
 import CoreMedia
 import CoreVideo
 
@@ -12,9 +11,11 @@ func fourCC(_ value: FourCharCode) -> String {
 let directory = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
 let outputDir = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
 try FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
-let context = CIContext(options: [.cacheIntermediates: false])
-for name in ["intro", "middle", "outro"] {
+for name in ["intro", "loop"] {
     let asset = AVURLAsset(url: directory.appendingPathComponent("\(name).mov"))
+    let imageGenerator = AVAssetImageGenerator(asset: asset)
+    imageGenerator.requestedTimeToleranceBefore = .zero
+    imageGenerator.requestedTimeToleranceAfter = .zero
     guard let track = asset.tracks(withMediaType: .video).first else { fatalError("No video \(name)") }
     let desc = track.formatDescriptions.first as! CMFormatDescription
     print("\(name): \(track.naturalSize), \(track.nominalFrameRate) fps, \(asset.duration.seconds) sec, codec \(fourCC(CMFormatDescriptionGetMediaSubType(desc))), transform \(track.preferredTransform), audio tracks \(asset.tracks(withMediaType: .audio).count)")
@@ -43,14 +44,15 @@ for name in ["intro", "middle", "outro"] {
                     }
                 }
             }
+            let cornerBytes = Array(UnsafeBufferPointer(start: bytes, count: 8))
             CVPixelBufferUnlockBaseAddress(buffer, .readOnly)
-            print("  frame \(frame): alpha0 \(transparent), partial \(translucent), opaque \(opaque), alpha range \(minimumAlpha)...\(maximumAlpha), corner bytes \(Array(UnsafeBufferPointer(start: bytes, count: 8))), content box \(minX),\(minY)→\(maxX),\(maxY)")
-            let image = CIImage(cvPixelBuffer: buffer)
-            if let cgImage = context.createCGImage(image, from: image.extent) {
-                let bitmap = NSBitmapImageRep(cgImage: cgImage)
-                let data = bitmap.representation(using: .png, properties: [:])!
-                try data.write(to: outputDir.appendingPathComponent("\(name)-\(frame).png"))
-            }
+            print("  frame \(frame): alpha0 \(transparent), partial \(translucent), opaque \(opaque), alpha range \(minimumAlpha)...\(maximumAlpha), corner bytes \(cornerBytes), content box \(minX),\(minY)→\(maxX),\(maxY)")
+            // Core Image does not render every 64ARGB decoder buffer format.
+            // AVAssetImageGenerator preserves native alpha when producing a CGImage.
+            let cgImage = try imageGenerator.copyCGImage(at: CMSampleBufferGetPresentationTimeStamp(sample), actualTime: nil)
+            let bitmap = NSBitmapImageRep(cgImage: cgImage)
+            let data = bitmap.representation(using: .png, properties: [:])!
+            try data.write(to: outputDir.appendingPathComponent("\(name)-\(frame).png"))
         }
         frame += 1
     }

@@ -14,43 +14,57 @@ if [[ " $architectures " != *" arm64 "* || " $architectures " != *" x86_64 "* ]]
     print -u2 "The disk image requires a universal app containing arm64 and x86_64."
     exit 1
 fi
+# Finder can attach custom-icon metadata after the build is moved into dist.
+xattr -dr com.apple.FinderInfo "$APP_DIR" 2>/dev/null || true
+xattr -dr com.apple.ResourceFork "$APP_DIR" 2>/dev/null || true
 codesign --verify --deep --strict "$APP_DIR"
 if [[ ! -f "$APP_DIR/Contents/Resources/ThirdPartyNotices.txt" ]]; then
     print -u2 "The app is missing its required ThirdPartyNotices.txt. Rebuild before sharing."
     exit 1
 fi
-for clip in intro middle outro; do
+for clip in intro loop; do
     if [[ ! -f "$APP_DIR/Contents/Resources/$clip.mov" ]]; then
         print -u2 "Missing bundled video: $clip.mov"
         exit 1
     fi
 done
 mkdir -p "$PROJECT_DIR/.build" "${OUTPUT_DMG:h}"
-DMG_BUILD_DIR=$(mktemp -d "$PROJECT_DIR/.build/dmg.XXXXXX")
+DMG_BUILD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ecoflow-dmg.XXXXXX")
 trap 'rm -rf "$DMG_BUILD_DIR"' EXIT
 DMG_STAGE="$DMG_BUILD_DIR/EcoFlow Cat"
 mkdir -p "$DMG_STAGE"
 # Preserve the complete signed bundle and symbolic links.
-ditto "$APP_DIR" "$DMG_STAGE/EcoFlow Cat.app"
+ditto --noextattr --norsrc "$APP_DIR" "$DMG_STAGE/EcoFlow Cat.app"
+codesign --verify --deep --strict "$DMG_STAGE/EcoFlow Cat.app"
 ln -s /Applications "$DMG_STAGE/Applications"
 cat > "$DMG_STAGE/Install.txt" <<'INSTALL'
 EcoFlow Cat for Mac
 
 Requires macOS 14 or later. Works on Apple silicon and Intel Macs.
-All three cat videos and the app icon are included.
+Both cat videos and the app icon are included.
 
 Install
 1. Drag EcoFlow Cat.app onto the Applications folder beside it.
 2. Eject this disk image.
 3. Open EcoFlow Cat from your Applications folder.
-4. Use its cat icon in the menu bar to open Settings or preview the cat.
+4. Click its Dock icon or menu bar icon to open Settings or preview the cat.
 
 Power connection
-Connect one supported EcoFlow power station to this Mac with a USB data cable.
-EcoFlow Cat reads the battery and input-power status directly over USB.
-PowerManager is not required. Quit PowerManager or other apps using the
-EcoFlow USB connection so EcoFlow Cat can read it. Open Settings to check
-the connection and choose an immediate reminder or a battery threshold.
+Quit the official EcoFlow app and PowerManager before connecting.
+Choose Automatic, USB, Bluetooth, or Wi-Fi (cloud) in Connection settings.
+USB uses a supported data cable. Bluetooth supports DELTA 3 / DELTA 3 Plus
+and automatically reuses an existing EcoFlow sign-in on this Mac. If none is
+available, sign in once using your EcoFlow email and password. No account
+codes are needed. Wi-Fi uses
+EcoFlow's cloud API and needs developer access/secret keys and the device
+serial number. Wireless support and firmware limitations are documented
+in the repository README.
+
+The Dock and menu bar show the EcoFlow battery percentage: green with AC connected,
+red with AC disconnected, and gray when fresh readings are unavailable.
+When AC is disconnected, the intro plays once and the loop repeats.
+Reconnecting AC immediately starts a short pop dismissal, even at 0 W.
+Open Settings to choose an immediate reminder or a battery threshold.
 
 No Terminal, compiler, or developer tools are needed to run EcoFlow Cat.
 

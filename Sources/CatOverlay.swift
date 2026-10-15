@@ -52,11 +52,11 @@ private final class CatVideoView: NSView {
 /// Bundle assets should be HEVC with alpha, converted once from the user's ProRes masters.
 @MainActor
 final class CatOverlayController {
-    enum PlaybackState: String { case hidden, intro, middle, outro }
+    enum PlaybackState: String { case hidden, intro, loop, dismissing }
 
     var onPlaybackError: ((String) -> Void)?
     var onVisibilityChanged: ((Bool) -> Void)?
-    var onOutroFinished: (() -> Void)?
+    var onDismissalFinished: (() -> Void)?
     private(set) var playbackState: PlaybackState = .hidden
     var isVisible: Bool { panel.isVisible }
     var isPreviewing: Bool { previewLoopTarget != nil }
@@ -67,7 +67,6 @@ final class CatOverlayController {
     private let assets: [String: AVURLAsset]
     private var looper: AVPlayerLooper?
     private var introItem: AVPlayerItem?
-    private var outroItem: AVPlayerItem?
     private var statusObservations: [NSKeyValueObservation] = []
     private var endObserver: NSObjectProtocol?
     private var failureObserver: NSObjectProtocol?
@@ -82,7 +81,7 @@ final class CatOverlayController {
     private var aspectRatio: CGFloat = 16.0 / 9.0
 
     init(assetDirectory: URL) {
-        assets = Dictionary(uniqueKeysWithValues: ["intro", "middle", "outro"].map {
+        assets = Dictionary(uniqueKeysWithValues: ["intro", "loop"].map {
             ($0, AVURLAsset(url: assetDirectory.appendingPathComponent("\($0).mov")))
         })
         videoView = CatVideoView(frame: .zero)
@@ -124,7 +123,7 @@ final class CatOverlayController {
             MainActor.assumeIsolated { self?.positionPanel() }
         }
         positionPanel()
-        if let asset = assets["middle"] {
+        if let asset = assets["loop"] {
             Task { [weak self] in
                 guard let track = try? await asset.loadTracks(withMediaType: .video).first,
                       let size = try? await track.load(.naturalSize), size.height > 0 else { return }
@@ -144,39 +143,61 @@ final class CatOverlayController {
 
     /// Idempotent while a real reminder is already playing.
     func startReminder() {
-        guard playbackState == .hidden || playbackState == .outro || isPreviewing else { return }
+        guard playbackState == .hidden || playbackState == .dismissing || isPreviewing else { return }
         start(previewLoops: nil)
     }
 
-    /// Plays intro, two complete middle loops, and outro without changing reminder settings.
+    /// Plays intro, two complete loops, then pops away without changing reminder settings.
     func preview() { start(previewLoops: 2) }
 
-    /// Charging resumes: interrupt intro or middle promptly and play the outro once.
+    /// AC reconnects: stop either video immediately, then pop the frozen image away.
     func finishReminder() {
-        guard playbackState != .hidden, playbackState != .outro else { return }
+        guard playbackState != .hidden, playbackState != .dismissing else { return }
         stopPreviewObserver()
-        playbackState = .outro
+        playbackState = .dismissing
+        player.pause()
         looper?.disableLooping()
         looper = nil
-        let current = player.currentItem
-        for item in player.items() where item !== current { player.remove(item) }
-        let item = makeItem("outro")
-        outroItem = item
-        player.insert(item, after: current)
-        if current != nil { player.advanceToNextItem() }
-        player.play()
+        let expectedGeneration = generation
+        let duration = 0.18
+        let scale = CAKeyframeAnimation(keyPath: "transform.scale")
+        scale.values = [1.0, 1.06, 0.01]
+        scale.keyTimes = [0.0, 0.24, 1.0]
+        scale.timingFunctions = [CAMediaTimingFunction(name: .easeOut), CAMediaTimingFunction(name: .easeIn)]
+        let opacity = CABasicAnimation(keyPath: "opacity")
+        opacity.fromValue = 1.0
+        opacity.toValue = 0.0
+        let group = CAAnimationGroup()
+        group.animations = [scale, opacity]
+        group.duration = duration
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        videoView.playerLayer.transform = CATransform3DMakeScale(0.01, 0.01, 1)
+        videoView.playerLayer.opacity = 0
+        videoView.playerLayer.add(group, forKey: "dismissalPop")
+        CATransaction.commit()
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
+            guard let self, self.generation == expectedGeneration, self.playbackState == .dismissing else { return }
+            self.hide()
+            self.onDismissalFinished?()
+        }
     }
 
     func hide() {
         generation += 1
         stopPreviewObserver()
         player.pause()
+        videoView.playerLayer.removeAnimation(forKey: "dismissalPop")
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        videoView.playerLayer.transform = CATransform3DIdentity
+        videoView.playerLayer.opacity = 1
+        CATransaction.commit()
         looper?.disableLooping()
         looper = nil
         player.removeAllItems()
         statusObservations.removeAll()
         introItem = nil
-        outroItem = nil
         previewLoopTarget = nil
         playbackState = .hidden
         let wasVisible = panel.isVisible
@@ -202,15 +223,17 @@ final class CatOverlayController {
          "playerStatus": player.status.rawValue,
          "windowFrame": NSStringFromRect(panel.frame),
          "muted": player.isMuted,
+         "playerRate": player.rate,
+         "hasPopAnimation": videoView.playerLayer.animation(forKey: "dismissalPop") != nil,
          "loopCount": looper?.loopCount ?? 0]
     }
 
     private func start(previewLoops: Int?) {
         hide()
-        guard ["intro", "middle", "outro"].allSatisfy({ name in
+        guard ["intro", "loop"].allSatisfy({ name in
             assets[name].map { FileManager.default.fileExists(atPath: $0.url.path) } ?? false
         }) else {
-            onPlaybackError?("Cat videos are missing. Expected intro.mov, middle.mov and outro.mov in the app's Resources folder.")
+            onPlaybackError?("Cat videos are missing. Expected intro.mov and loop.mov in the app's Resources folder.")
             return
         }
         previewLoopTarget = previewLoops
@@ -218,19 +241,19 @@ final class CatOverlayController {
         let intro = makeItem("intro")
         introItem = intro
         player.insert(intro, after: nil)
-        let middle = makeItem("middle")
-        looper = AVPlayerLooper(player: player, templateItem: middle,
+        let loop = makeItem("loop")
+        looper = AVPlayerLooper(player: player, templateItem: loop,
                                 timeRange: .invalid,
                                 existingItemsOrdering: .loopingItemsFollowExistingItems)
         for item in looper?.loopingPlayerItems ?? [] { observeStatus(item) }
         if let target = previewLoopTarget {
-            // Queue changes must occur outside AVPlayerItemDidPlayToEndTime: AVQueuePlayer
-            // is still advancing at that notification and can otherwise skip the outro.
+            // Check completed loops outside the end notification, while AVQueuePlayer
+            // finishes advancing its queue. The pop then interrupts playback immediately.
             previewTimeObserver = player.addPeriodicTimeObserver(
                 forInterval: CMTime(seconds: 0.1, preferredTimescale: 600), queue: .main
             ) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    guard let self, self.playbackState == .middle,
+                    guard let self, self.playbackState == .loop,
                           let count = self.looper?.loopCount, count >= target else { return }
                     self.finishReminder()
                 }
@@ -260,17 +283,14 @@ final class CatOverlayController {
     }
 
     private func owns(_ item: AVPlayerItem) -> Bool {
-        item === introItem || item === outroItem || player.items().contains(where: { $0 === item }) ||
+        item === introItem || player.items().contains(where: { $0 === item }) ||
         (looper?.loopingPlayerItems.contains(where: { $0 === item }) ?? false)
     }
 
     private func itemEnded(_ item: AVPlayerItem?) {
         guard let item else { return }
-        if item === outroItem, playbackState == .outro {
-            hide()
-            onOutroFinished?()
-        } else if item === introItem, playbackState == .intro {
-            playbackState = .middle
+        if item === introItem, playbackState == .intro {
+            playbackState = .loop
         }
     }
 
