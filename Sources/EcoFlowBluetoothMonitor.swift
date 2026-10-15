@@ -16,10 +16,7 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
     private var sessionKey: [UInt8] = []
     private var iv: [UInt8] = []
     private var frames = EcoFlowWirelessProtocol.FrameBuffer()
-    private var metrics = EcoFlowWirelessProtocol.Metrics()
-    private var fieldDates: [String: Date] = [:]
-    private var lastReading = Date.distantPast
-    private var latest: PowerTelemetry?
+    private var readings = EcoFlowBluetoothSessionState()
     private var failure: Error?
     private var retryAfter = Date.distantPast
     private var pendingWrites: [Data] = []
@@ -47,7 +44,7 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
         if central.state == .unauthorized { throw EcoFlowWirelessError.message("Allow Bluetooth for Nacho Power in System Settings → Privacy & Security → Bluetooth.") }
         if central.state == .poweredOff { throw EcoFlowWirelessError.message("Turn on Bluetooth to connect to the EcoFlow.") }
         if central.state == .unsupported { throw EcoFlowWirelessError.message("Bluetooth Low Energy is unavailable on this Mac.") }
-        if phase == .ready && Date().timeIntervalSince(lastReading) > 15 {
+        if phase == .ready && readings.streamIsStale(at: Date()) {
             fail(EcoFlowWirelessError.message("EcoFlow Bluetooth readings stopped. Reconnecting…"))
         }
         if phase != .idle && phase != .ready && Date().timeIntervalSince(phaseStarted) > 20 {
@@ -59,7 +56,8 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
         for _ in 0..<25 {
             try Task.checkCancellation()
             guard currentGeneration == generation else { throw failure ?? EcoFlowWirelessError.message("Bluetooth reconnecting…") }
-            if let latest, phase == .ready, Date().timeIntervalSince(latest.timestamp) <= 15 { return latest }
+            if phase == .ready, let advertisement,
+               let latest = readings.snapshot(deviceName: advertisement.deviceName, at: Date()) { return latest }
             if let failure, phase == .idle { throw failure }
             try await Task.sleep(nanoseconds: 200_000_000)
         }
@@ -79,8 +77,8 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
         central?.stopScan()
         if let peripheral { peripheral.delegate = nil; central?.cancelPeripheralConnection(peripheral) }
         peripheral = nil; writeCharacteristic = nil; advertisement = nil
-        keyExchange = nil; sessionKey = []; iv = []; frames = .init(); metrics = .init(); fieldDates = [:]
-        latest = nil; lastReading = .distantPast; pendingWrites = []; writeInProgress = false
+        keyExchange = nil; sessionKey = []; iv = []; frames = .init(); readings.reset()
+        pendingWrites = []; writeInProgress = false
         scanCandidates = [:]; phase = .idle; failure = nil
     }
 
@@ -219,31 +217,24 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
         case .authStatus, .authenticating, .ready:
             let plain = try EcoFlowWirelessProtocol.crypt(payload, key: sessionKey, iv: iv, encrypt: false)
             let packet = try EcoFlowWirelessProtocol.parsePacket(plain)
-            if phase == .authStatus {
-                guard packet.source == 0x35, packet.commandSet == 0x35, packet.command == 0x89, let advertisement else { return }
+            let stage: EcoFlowBluetoothSessionState.AuthenticationStage
+            switch phase {
+            case .authStatus: stage = .awaitingStatus
+            case .authenticating: stage = .awaitingOwnerAcknowledgment
+            default: stage = .authenticated
+            }
+            switch try readings.receive(packet, stage: stage, at: Date()) {
+            case .requestOwnerAuthentication:
+                guard let advertisement else { return }
                 let digest = EcoFlowWirelessProtocol.md5(Array((configuration.userID + advertisement.serial).utf8))
                 let auth = digest.map { String(format: "%02X", $0) }.joined()
-                setPhase(.authenticating); try sendAuth(command: 0x86, payload: Array(auth.utf8)); return
+                setPhase(.authenticating); try sendAuth(command: 0x86, payload: Array(auth.utf8))
+            case .ownerAccepted:
+                setPhase(.ready)
+            case .telemetryReceived, .ignored:
+                // Early uploads remain private until the owner reply succeeds.
+                break
             }
-            if packet.source == 0x35, packet.commandSet == 0x35, packet.command == 0x86 {
-                guard packet.payload == [0] else { throw EcoFlowWirelessError.authentication }
-                setPhase(.ready); lastReading = Date(); return
-            }
-            guard packet.source == 2, packet.commandSet == 0xfe, packet.command == 0x15 else { return }
-            let update = try EcoFlowWirelessProtocol.metrics(packet.payload)
-            guard update.changed, let advertisement else { return }
-            setPhase(.ready); lastReading = Date()
-            if let value = update.battery { metrics.battery = value; fieldDates["battery"] = lastReading }
-            if let value = update.acConnected { metrics.acConnected = value; fieldDates["ac"] = lastReading }
-            if let value = update.acWatts { metrics.acWatts = value; fieldDates["acWatts"] = lastReading }
-            if let value = update.totalWatts { metrics.totalWatts = value; fieldDates["totalWatts"] = lastReading }
-            func fresh(_ field: String) -> Bool { lastReading.timeIntervalSince(fieldDates[field] ?? .distantPast) <= 90 }
-            // Reset at every disconnect; incremental updates retain prior values
-            // only inside the same authenticated, actively transmitting session.
-            latest = PowerTelemetry(deviceName: advertisement.deviceName, batteryPercentage: fresh("battery") ? metrics.battery : nil,
-                acInputWatts: fresh("acWatts") ? metrics.acWatts : nil, totalInputWatts: fresh("totalWatts") ? metrics.totalWatts : nil,
-                acConnected: fresh("ac") ? metrics.acConnected : nil,
-                sourceDescription: "Bluetooth · direct local connection", timestamp: lastReading)
         default: break
         }
     }

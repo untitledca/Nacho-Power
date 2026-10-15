@@ -47,7 +47,9 @@ The default reminder setting is **Immediately**: a fresh, explicit AC-disconnect
 
 The animation fills the selected display by default. Turn off full-screen fitting for a smaller corner overlay. Audio is muted. **Preview cat** plays the intro and two loops, then pops away; **End preview** dismisses it immediately.
 
-Missing data never counts as an unplug event. A complete telemetry interruption starts a 30-second reminder grace period, then the cat hides. Bluetooth updates can contain only changed fields; retained fields expire after 90 seconds without a refresh. Explicit AC presence is authoritative even at 0 W. If a source supplies only AC wattage, two fresh readings confirm a change.
+Missing data never counts as an unplug event. A complete telemetry interruption starts a 30-second reminder grace period, then the cat hides. Bluetooth updates can contain only changed fields: a known AC state stays valid while the same authenticated session continues delivering live telemetry. Disconnecting or a stalled stream clears that state before reconnecting. Explicit AC presence is authoritative even at 0 W; zero watts alone never means the AC cable is unplugged.
+
+**A gray icon with a battery percentage means the app has battery data but no reliable AC status.** Check Settings for **AC status unavailable**. Wait briefly for the station's initial status, then use **Save & connect** with the official EcoFlow app closed. If the status stays unknown, report the station model and firmware, the connection source shown in Settings, and the displayed status. The app keeps AC unknown when the station has not supplied its AC-presence flag, even if the battery percentage is available.
 
 ## Device support and verification
 

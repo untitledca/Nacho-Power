@@ -17,6 +17,7 @@ xcrun swiftc -parse-as-library -swift-version 5 \
     "$PROJECT_DIR/Sources/DirectEcoFlowMonitor.swift" \
     "$PROJECT_DIR/Sources/EcoFlowWirelessProtocol.swift" \
     "$PROJECT_DIR/Sources/EcoFlowSessionKeyData.swift" \
+    "$PROJECT_DIR/Sources/EcoFlowBluetoothSessionState.swift" \
     "$PROJECT_DIR/Sources/EcoFlowBluetoothMonitor.swift" \
     "$PROJECT_DIR/Sources/EcoFlowConnectionMonitor.swift" \
     "$PROJECT_DIR/Tests/WirelessProtocolChecks.swift" \
@@ -29,6 +30,7 @@ xcrun swiftc -parse-as-library -swift-version 5 \
     "$PROJECT_DIR/Sources/DirectEcoFlowMonitor.swift" \
     "$PROJECT_DIR/Sources/EcoFlowWirelessProtocol.swift" \
     "$PROJECT_DIR/Sources/EcoFlowSessionKeyData.swift" \
+    "$PROJECT_DIR/Sources/EcoFlowBluetoothSessionState.swift" \
     "$PROJECT_DIR/Sources/EcoFlowBluetoothMonitor.swift" \
     "$PROJECT_DIR/Sources/EcoFlowConnectionMonitor.swift" \
     "$PROJECT_DIR/Tests/CloudProtocolChecks.swift" \
@@ -41,3 +43,14 @@ xcrun swiftc -parse-as-library -swift-version 5 "$PROJECT_DIR/Sources/EcoFlowAcc
 
 xcrun swiftc -parse-as-library -swift-version 5 "$PROJECT_DIR/Sources/AppUpdateChecker.swift" "$PROJECT_DIR/Tests/AppUpdateChecks.swift" -o "$PROJECT_DIR/.build/app-update-checks"
 "$PROJECT_DIR/.build/app-update-checks"
+
+# Session state uses the production parser and routing rules without BLE hardware.
+xcrun swiftc -parse-as-library -swift-version 5 \
+    "$PROJECT_DIR/Sources/TelemetryModels.swift" \
+    "$PROJECT_DIR/Sources/EcoFlowWirelessProtocol.swift" \
+    "$PROJECT_DIR/Sources/EcoFlowSessionKeyData.swift" \
+    "$PROJECT_DIR/Sources/EcoFlowBluetoothSessionState.swift" \
+    "$PROJECT_DIR/Tests/BluetoothSessionChecks.swift" \
+    "$PROJECT_DIR/.build/ecoflow-crypto-tests.o" \
+    -o "$PROJECT_DIR/.build/bluetooth-session-checks"
+"$PROJECT_DIR/.build/bluetooth-session-checks"
