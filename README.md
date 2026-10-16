@@ -6,7 +6,7 @@ A Mac app that reminds you to reconnect your EcoFlow to AC power. It shows the s
 
 The Dock icon and menu-bar battery indicator are **green when AC is connected** and **red when AC is disconnected**. It shows an unknown state when a reliable connection or AC reading is unavailable. A fully charged station can be green even while drawing 0 W.
 
-The app includes both cat videos and the logo. No Terminal, developer tools, PowerManager, or additional drivers are needed to run the installed app. Wireless setup has the account requirements described below; USB does not require an account.
+The app includes left- and right-side cat videos and the logo. No Terminal, developer tools, PowerManager, or additional drivers are needed to run the installed app. Wireless setup has the account requirements described below; USB does not require an account.
 
 ## Install
 
@@ -20,15 +20,15 @@ Requires macOS 14 or newer. The app contains native Apple silicon and Intel bina
 
 ## Updates
 
-Starting with **v1.3.0**, choose **Check for Updates** in Settings or the menu bar to check the latest published GitHub release. Automatic checks run once a day while the app is open and show an update notice in the app and menu when a newer release is available. You can turn automatic checks off in Settings.
+Starting with **v1.3.0**, choose **Check for Updates** in Settings or the menu bar to check the latest published GitHub release. Enable **Check automatically for updates** in Settings to check immediately, then once a day while the app is open. The app also checks on launch when a daily check is due, and shows an update notice in the app and menu when a newer release is available. Starting with v1.3.3, automatic checking is off for fresh installs until selected; upgrading preserves your saved choice. You can turn it off at any time.
 
-**Download installer** opens that release's DMG on GitHub. Installer filenames follow `Nacho-Power-VERSION-universal.dmg`. Open the downloaded disk image, quit Nacho Power, and replace the app in Applications. Updates require this installation step; the app does not install or restart itself automatically. The update check reads public release information from GitHub and does not send your EcoFlow credentials, station telemetry, or Venmo information.
+**Download installer** opens that release's DMG on GitHub. Installer filenames follow `Nacho-Power-VERSION-universal.dmg`. Open the downloaded disk image, quit Nacho Power, and replace the app in Applications. Updates require this installation step; the app does not install or restart itself automatically. The update check reads public release information from GitHub and does not send your EcoFlow credentials, station telemetry, or payment information.
 
 **Users on v1.2.0 or earlier need to [download and install a newer release](https://github.com/untitledca/Nacho-Power/releases/latest) once** to get the update checker. Those older copies cannot receive an updater retroactively.
 
 ## Support Nacho Power
 
-If you like the app, [buy me a beer on Venmo](https://venmo.com/u/chaseabrams99) 🍺. The same link is available in Settings and the menu bar. Tips are optional, and you choose the amount in Venmo.
+If you like the app, **Support Nacho Power** in Settings or the menu bar opens the same optional **$5 / $10 / $25 USD** QuickBooks checkouts used on the [Atom Film Lab Apps page](https://www.atomfilmlab.com/apps). Each is a one-time payment to Atom Film Lab Inc.; review the checkout before paying. Nacho Power remains free, and support does not unlock features.
 
 ## Connect and use
 
@@ -43,7 +43,7 @@ Open **Connection settings**, choose a transport, enter any required details, an
 
 The app stores the discovered or signed-in Bluetooth account identity and cloud API keys in this Mac's Keychain. The optional sign-in helper sends your password directly to EcoFlow over HTTPS for that request and never saves it. Subsequent Bluetooth connections use the stored account ID. Settings show the battery, input power, AC state, and connection errors.
 
-The default reminder setting is **Immediately**: a fresh, reliable AC-disconnected reading starts `intro.mov` once, followed by `loop.mov` repeating. Reconnecting AC interrupts either video immediately and removes the cat with a short, approximately 0.18-second pop. It does not wait for charging watts or a separate outro movie. Existing saved battery-threshold preferences remain available; a threshold starts the cat only when the battery is strictly below that value.
+The default reminder setting is **Immediately**: a fresh, reliable AC-disconnected reading starts the intro once, followed by the loop repeating. **Bottom left** and **Top left** use `intro_left.mov` and `looping_left.mov`, where the cat enters from the left. **Bottom right** and **Top right** keep the original `intro.mov` and `loop.mov`. Reconnecting AC interrupts either video immediately and removes the cat with a short, approximately 0.18-second pop. It does not wait for charging watts or a separate outro movie. Existing saved battery-threshold preferences remain available; a threshold starts the cat only when the battery is strictly below that value.
 
 The animation fills the selected display by default. Turn off full-screen fitting for a smaller corner overlay. Audio is muted. **Preview cat** plays the intro and two loops, then pops away; **End preview** dismisses it immediately.
 
@@ -73,22 +73,23 @@ Scripts/make-dmg.sh
 
 The build compiles both architectures, bundles resources, and signs locally. The DMG includes drag-to-Applications installation and a SHA-256 checksum. Developer ID signing and Apple notarization require a suitable certificate and Apple Developer access.
 
-Reminder tests cover thresholds, AC flicker, missing or stale readings, immediate explicit AC changes, and reconnection at zero watts. Native AppKit playback checks cover intro interruption, repeated loops, preview completion, pop timing, restarting during dismissal, and transparent click-through window behavior. The new supplied videos have also passed a full intro → two loops → pop run.
+Reminder tests cover thresholds, AC flicker, missing or stale readings, immediate explicit AC changes, and reconnection at zero watts. Native AppKit playback checks cover intro interruption, repeated loops, preview completion, pop timing, restarting during dismissal, and transparent click-through window behavior. Both supplied video pairs have passed a full intro → two loops → pop run. Side-switch tests cover both directions, preserving intro/loop progress, top/bottom moves, rapid changes, and interruption during dismissal.
 
 USB hardware checks are optional: run `Scripts/test.sh --live` with a supported station connected and competing EcoFlow/PowerManager apps closed. Wireless credentials and a physical station are required for live wireless verification.
 
 ## Replace the animation
 
-Export `intro.mov` and `loop.mov` as QuickTime ProRes 4444 with actual transparency. Keep the same canvas and frame rate, and match the intro's last frame to the loop's first frame. Then run:
+Export `intro.mov` / `loop.mov` for right positions, or `intro_left.mov` / `looping_left.mov` for left positions, as QuickTime ProRes 4444 with actual transparency. Keep the same canvas and frame rate, and match the intro's last frame to the loop's first frame. Then run:
 
 ```sh
-Scripts/prepare-videos.sh /path/to/ProRes-masters
+Scripts/prepare-videos.sh /path/to/right-masters right
+Scripts/prepare-videos.sh /path/to/left-masters left
 Scripts/build.sh
 Scripts/make-dmg.sh
 ```
 
 Preparation checks decoded alpha pixels in the masters, makes smaller native HEVC files with alpha, then validates the converted files. It preserves the masters and rejects videos without usable transparency. Quit and reopen the app after rebuilding.
 
-The supplied animation uses a **1920 × 1080 canvas at 24 fps**: a **20-second intro** and a **16.625-second loop**. The two converted movies total approximately **12.9 MB**. Dismissal is an AppKit/Core Animation pop, so no outro asset is required.
+Both animation pairs use a **1920 × 1080 canvas at 24 fps**. The right pair has a **20-second intro** and **16.625-second loop**; the left pair has a **10-second intro** and **11.333-second loop**. The left pair adds approximately **5.8 MB** after conversion, with transparency preserved. Dismissal is an AppKit/Core Animation pop, so no outro asset is required.
 
 The logo was generated from the supplied cat photograph using the built-in image generator. The [design prompt](docs/new-name-logo-prompt.txt) and [icon packager](tools/make-app-icon.swift) are included.

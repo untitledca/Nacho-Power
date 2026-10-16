@@ -52,7 +52,10 @@ private struct AppUpdateChecks {
         let clock = TestClock()
         let success = MockTransport(data: valid)
         let checker = AppUpdateChecker(currentVersion: "1.2.0", defaults: defaults, now: { clock.now }, fetch: { try await success.send($0) })
-        check(checker.automaticallyChecksForUpdates, "automatic checks default enabled")
+        check(!checker.automaticallyChecksForUpdates, "fresh installs wait for the user to opt in")
+        await checker.checkAutomaticallyIfDue()
+        check(await success.requestCount == 0, "an unset preference never contacts GitHub automatically")
+        checker.automaticallyChecksForUpdates = true
         await checker.checkAutomaticallyIfDue()
         check(checker.state == .updateAvailable && checker.latestRelease == release, "newer release produces in-app update state")
         check(checker.lastCheckedAt == clock.now && checker.errorMessage == nil, "successful check timestamp and clean error state")
@@ -82,6 +85,7 @@ private struct AppUpdateChecks {
         check(ahead.state == .current, "older public release never suggests a downgrade")
 
         reset()
+        defaults.set(true, forKey: AppUpdateChecker.automaticPreferenceKey)
         let offline = MockTransport(data: valid, error: URLError(.notConnectedToInternet))
         let failed = AppUpdateChecker(currentVersion: "1.2.0", defaults: defaults, now: { clock.now }, fetch: { try await offline.send($0) })
         await failed.checkAutomaticallyIfDue()
@@ -115,6 +119,7 @@ private struct AppUpdateChecks {
         check(unknown.state == .unavailable, "unknown installed version never guesses current status")
 
         reset()
+        defaults.set(true, forKey: AppUpdateChecker.automaticPreferenceKey)
         let gate = MockTransport(data: valid, paused: true)
         let concurrent = AppUpdateChecker(currentVersion: "1.2.0", defaults: defaults, fetch: { try await gate.send($0) })
         let auto = Task { await concurrent.checkAutomaticallyIfDue() }
@@ -131,6 +136,7 @@ private struct AppUpdateChecks {
         check(await gate.requestCount == 1 && concurrent.state == .updateAvailable, "coalesced callers share the completed result")
 
         reset()
+        defaults.set(true, forKey: AppUpdateChecker.automaticPreferenceKey)
         let manualGate = MockTransport(data: valid, paused: true)
         let manualFirst = AppUpdateChecker(currentVersion: "1.2.0", defaults: defaults, fetch: { try await manualGate.send($0) })
         var consistentStates = true
@@ -151,11 +157,72 @@ private struct AppUpdateChecks {
         check(consistentStates, "menu callbacks see coherent published result properties")
         manualFirst.onChange = nil
 
+        reset()
+        let scheduledTransport = MockTransport(data: valid)
+        let schedule = TestSchedule()
+        let scheduled = AppUpdateChecker(currentVersion: "1.2.0", defaults: defaults,
+                                         now: { clock.now }, scheduleAutomaticChecks: { schedule.install($0) },
+                                         fetch: { try await scheduledTransport.send($0) })
+        scheduled.start()
+        scheduled.start()
+        await settleTasks()
+        check(schedule.installations == 1, "start is idempotent and installs one recurring schedule")
+        check(await scheduledTransport.requestCount == 0, "fresh launch without opt-in does not check")
+        // A recent attempt must not prevent the user from beginning checks now.
+        defaults.set(clock.now, forKey: AppUpdateChecker.lastAttemptPreferenceKey)
+        scheduled.automaticallyChecksForUpdates = true
+        await scheduledTransport.waitForRequests(1)
+        await settleTasks()
+        check(await scheduledTransport.requestCount == 1 && scheduled.state == .updateAvailable, "opting in immediately checks despite a recent attempt")
+        scheduled.automaticallyChecksForUpdates = true
+        schedule.fire()
+        await settleTasks()
+        check(await scheduledTransport.requestCount == 1, "unchanged selection and same-day timer wakeup do not repeat a check")
+        clock.now.addTimeInterval(AppUpdateChecker.checkInterval)
+        schedule.fire()
+        await scheduledTransport.waitForRequests(2)
+        await settleTasks()
+        check(await scheduledTransport.requestCount == 2, "recurring schedule checks again once a day is due")
+        scheduled.automaticallyChecksForUpdates = false
+        clock.now.addTimeInterval(AppUpdateChecker.checkInterval)
+        schedule.fire()
+        await settleTasks()
+        check(await scheduledTransport.requestCount == 2, "disabled preference prevents scheduled network access")
+        scheduled.automaticallyChecksForUpdates = true
+        await scheduledTransport.waitForRequests(3)
+        await settleTasks()
+        let queuedCallback = schedule.callback
+        scheduled.stop()
+        clock.now.addTimeInterval(AppUpdateChecker.checkInterval)
+        queuedCallback?()
+        await settleTasks()
+        check(await scheduledTransport.requestCount == 3 && schedule.cancellations == 1, "stop cancels timer and queued callbacks cannot check")
+        scheduled.start()
+        await scheduledTransport.waitForRequests(4)
+        await settleTasks()
+        check(await scheduledTransport.requestCount == 4 && schedule.installations == 2, "a due launch checks immediately after start")
+        scheduled.stop()
+
+        // Recreate the checker to exercise a saved ON preference and launch
+        // throttling, rather than only calling the due-check helper directly.
+        let relaunchSchedule = TestSchedule()
+        let relaunched = AppUpdateChecker(currentVersion: "1.2.0", defaults: defaults,
+                                          now: { clock.now }, scheduleAutomaticChecks: { relaunchSchedule.install($0) },
+                                          fetch: { try await scheduledTransport.send($0) })
+        check(relaunched.automaticallyChecksForUpdates, "stored ON selection survives an upgrade/relaunch")
+        relaunched.start()
+        await settleTasks()
+        check(await scheduledTransport.requestCount == 4, "launch within the daily interval keeps the stored throttle")
+        relaunched.stop()
+
         print("PASS update version comparison, release/installer validation, recovery, persistence, daily scheduling, and concurrent checks")
     }
 
     private static func check(_ condition: Bool, _ message: String) {
         precondition(condition, "FAIL \(message)")
+    }
+    private static func settleTasks() async {
+        for _ in 0..<50 { await Task.yield() }
     }
     private static func asset(name: String = "Nacho-Power-1.3.0-universal.dmg",
                               url: String = "https://github.com/untitledca/Nacho-Power/releases/download/v1.3.0/Nacho-Power-1.3.0-universal.dmg",
@@ -174,6 +241,18 @@ private struct AppUpdateChecks {
 
 @MainActor private final class TestClock {
     var now = Date(timeIntervalSince1970: 1_800_000_000)
+}
+
+@MainActor private final class TestSchedule {
+    private(set) var installations = 0
+    private(set) var cancellations = 0
+    private(set) var callback: (() -> Void)?
+    func install(_ action: @escaping () -> Void) -> () -> Void {
+        installations += 1
+        callback = action
+        return { self.cancellations += 1; self.callback = nil }
+    }
+    func fire() { callback?() }
 }
 
 private actor MockTransport {
@@ -205,6 +284,11 @@ private actor MockTransport {
     func waitForRequest() async {
         if !requests.isEmpty { return }
         await withCheckedContinuation { requestWaiters.append($0) }
+    }
+    func waitForRequests(_ count: Int) async {
+        while requests.count < count {
+            await withCheckedContinuation { requestWaiters.append($0) }
+        }
     }
     func resume() {
         paused = false

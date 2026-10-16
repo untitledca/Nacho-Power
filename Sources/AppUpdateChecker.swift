@@ -114,6 +114,7 @@ enum AppUpdateError: Error, LocalizedError {
 @MainActor
 final class AppUpdateChecker: ObservableObject {
     typealias Fetch = (URLRequest) async throws -> (Data, URLResponse)
+    typealias AutomaticScheduler = @MainActor (@escaping () -> Void) -> () -> Void
 
     static let releasesURL = AppRelease.releasesURL
     static let automaticPreferenceKey = "automaticallyChecksForUpdates"
@@ -128,10 +129,16 @@ final class AppUpdateChecker: ObservableObject {
     @Published private(set) var lastCheckedAt: Date?
     @Published var automaticallyChecksForUpdates: Bool {
         didSet {
+            guard automaticallyChecksForUpdates != oldValue else { return }
             defaults.set(automaticallyChecksForUpdates, forKey: Self.automaticPreferenceKey)
             onChange?()
             if automaticallyChecksForUpdates && isStarted {
-                Task { [weak self] in await self?.checkAutomaticallyIfDue() }
+                // Opting in is an explicit request to begin checking now, even
+                // if a recent manual check or failed attempt is on record.
+                Task { [weak self] in
+                    guard let self, self.isStarted, self.automaticallyChecksForUpdates else { return }
+                    await self.checkForUpdates()
+                }
             }
         }
     }
@@ -141,19 +148,22 @@ final class AppUpdateChecker: ObservableObject {
     private let defaults: UserDefaults
     private let fetch: Fetch
     private let now: () -> Date
+    private let scheduleAutomaticChecks: AutomaticScheduler
     private var checkTask: Task<Void, Never>?
-    private var timer: Timer?
+    private var cancelAutomaticSchedule: (() -> Void)?
     private var isStarted = false
 
     init(currentVersion: String = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown",
          defaults: UserDefaults = .standard,
          now: @escaping () -> Date = Date.init,
+         scheduleAutomaticChecks: @escaping AutomaticScheduler = AppUpdateChecker.scheduleTimer,
          fetch: @escaping Fetch = AppUpdateChecker.fetchLatestRelease) {
         self.currentVersion = currentVersion
         self.defaults = defaults
         self.now = now
+        self.scheduleAutomaticChecks = scheduleAutomaticChecks
         self.fetch = fetch
-        automaticallyChecksForUpdates = defaults.object(forKey: Self.automaticPreferenceKey) as? Bool ?? true
+        automaticallyChecksForUpdates = defaults.object(forKey: Self.automaticPreferenceKey) as? Bool ?? false
         if let checked = defaults.object(forKey: Self.lastSuccessPreferenceKey) as? Date,
            let data = defaults.data(forKey: Self.cachedReleasePreferenceKey),
            let release = try? AppRelease.decode(data),
@@ -168,17 +178,29 @@ final class AppUpdateChecker: ObservableObject {
         guard !isStarted else { return }
         isStarted = true
         // Revisit the due time while the app stays open, including after sleep.
-        timer = Timer.scheduledTimer(withTimeInterval: 60 * 60, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in await self?.checkAutomaticallyIfDue() }
+        cancelAutomaticSchedule = scheduleAutomaticChecks { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self, self.isStarted else { return }
+                await self.checkAutomaticallyIfDue()
+            }
         }
-        Task { [weak self] in await self?.checkAutomaticallyIfDue() }
+        Task { [weak self] in
+            guard let self, self.isStarted else { return }
+            await self.checkAutomaticallyIfDue()
+        }
     }
 
     func stop() {
         isStarted = false
-        timer?.invalidate()
-        timer = nil
+        cancelAutomaticSchedule?()
+        cancelAutomaticSchedule = nil
         checkTask?.cancel()
+    }
+
+    private static func scheduleTimer(_ callback: @escaping () -> Void) -> () -> Void {
+        let timer = Timer(timeInterval: 60 * 60, repeats: true) { _ in callback() }
+        RunLoop.main.add(timer, forMode: .common)
+        return { timer.invalidate() }
     }
 
     func checkAutomaticallyIfDue() async {

@@ -9,7 +9,7 @@ if [[ ! -f "$PROJECT_DIR/Resources/ThirdPartyNotices.txt" ]]; then
     print -u2 "Missing required distribution resource: ThirdPartyNotices.txt"
     exit 1
 fi
-for clip in intro loop; do
+for clip in intro loop intro_left looping_left; do
     if [[ ! -f "$ASSET_DIR/$clip.mov" ]]; then
         print -u2 "Missing video: $ASSET_DIR/$clip.mov"
         exit 1
@@ -40,7 +40,7 @@ for resource in "$PROJECT_DIR"/Resources/*(N); do
         ditto --noextattr --norsrc "$resource" "$BUILD_APP_DIR/Contents/Resources/${resource:t}"
     fi
 done
-for clip in intro loop; do
+for clip in intro loop intro_left looping_left; do
     cp -X "$ASSET_DIR/$clip.mov" "$BUILD_APP_DIR/Contents/Resources/$clip.mov"
 done
 if [[ -f "$ASSET_DIR/video-validation.json" ]]; then

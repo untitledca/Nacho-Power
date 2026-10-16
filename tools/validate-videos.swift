@@ -28,14 +28,15 @@ struct ValidationReport: Codable {
 }
 @main struct ValidateVideos {
     static func main() async throws {
-        guard CommandLine.arguments.count == 3 else {
-            fputs("Usage: validate-videos INPUT_DIRECTORY OUTPUT_REPORT\n", stderr)
+        guard CommandLine.arguments.count >= 3 else {
+            fputs("Usage: validate-videos INPUT_DIRECTORY OUTPUT_REPORT [CLIP_NAMES...]\n", stderr)
             exit(2)
         }
         let folder = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
         let output = URL(fileURLWithPath: CommandLine.arguments[2])
         var reports: [VideoReport] = []
-        for name in ["intro", "loop"] {
+        let names = CommandLine.arguments.count > 3 ? Array(CommandLine.arguments.dropFirst(3)) : ["intro", "loop"]
+        for name in names {
             let asset = AVURLAsset(url: folder.appendingPathComponent("\(name).mov"))
             guard let track = try await asset.loadTracks(withMediaType: .video).first else {
                 throw NSError(domain: "EcoFlowCatValidation", code: 1, userInfo: [NSLocalizedDescriptionKey: "No video track in \(name).mov"])

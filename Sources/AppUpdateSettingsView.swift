@@ -13,11 +13,18 @@ struct AppUpdateSettingsView: View {
             }
             Toggle("Check automatically for updates", isOn: $updates.automaticallyChecksForUpdates)
                 .toggleStyle(.switch)
-                .help("Checks GitHub once a day while Nacho Power is running. Updates are installed only when you choose to download and replace the app.")
+                .help("Turning this on checks GitHub immediately. After that, Nacho Power checks daily while running and on launch when a check is due.")
+            Text("When enabled, checks now, on launch when due, and daily while Nacho Power is running. You choose when to download and install.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             Text(statusText)
                 .font(.system(size: 12))
                 .foregroundStyle(updates.state == .unavailable ? Color.orange : Color.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            if let checked = updates.lastCheckedAt {
+                Text("Last checked: \(checked.formatted(date: .abbreviated, time: .shortened))")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            }
             HStack {
                 Button(updates.state == .checking ? "Checking…" : "Check for Updates") {
                     Task { await updates.checkForUpdates() }
@@ -41,7 +48,7 @@ struct AppUpdateSettingsView: View {
 
     private var statusText: String {
         switch updates.state {
-        case .notChecked: return "Daily checks let you know when a new GitHub installer is available."
+        case .notChecked: return "No update check yet."
         case .checking: return "Checking GitHub for the latest version…"
         case .current: return "You’re up to date."
         case .updateAvailable: return "A new version of Nacho Power is ready."

@@ -11,7 +11,8 @@ func fourCC(_ value: FourCharCode) -> String {
 let directory = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
 let outputDir = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
 try FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
-for name in ["intro", "loop"] {
+let names = CommandLine.arguments.count > 3 ? Array(CommandLine.arguments.dropFirst(3)) : ["intro", "loop"]
+for name in names {
     let asset = AVURLAsset(url: directory.appendingPathComponent("\(name).mov"))
     let imageGenerator = AVAssetImageGenerator(asset: asset)
     imageGenerator.requestedTimeToleranceBefore = .zero

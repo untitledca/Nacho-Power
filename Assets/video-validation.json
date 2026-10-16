@@ -1,5 +1,5 @@
 {
-  "generatedAt" : "2026-10-15T02:33:45Z",
+  "generatedAt" : "2026-10-16T00:32:34Z",
   "validForTransparentOverlay" : true,
   "videos" : [
     {
@@ -62,6 +62,68 @@
         }
       ],
       "seconds" : 16.625,
+      "width" : 1920
+    },
+    {
+      "alphaMetadata" : true,
+      "file" : "intro_left.mov",
+      "frameRate" : 24,
+      "height" : 1080,
+      "samples" : [
+        {
+          "cornerAlpha" : 0,
+          "maximumAlpha" : 0,
+          "minimumAlpha" : 0,
+          "time" : 0,
+          "transparentFraction" : 1
+        },
+        {
+          "cornerAlpha" : 0,
+          "maximumAlpha" : 65535,
+          "minimumAlpha" : 0,
+          "time" : 5,
+          "transparentFraction" : 0.8754552469135802
+        },
+        {
+          "cornerAlpha" : 0,
+          "maximumAlpha" : 65535,
+          "minimumAlpha" : 0,
+          "time" : 9.958333333333334,
+          "transparentFraction" : 0.8634664351851852
+        }
+      ],
+      "seconds" : 10,
+      "width" : 1920
+    },
+    {
+      "alphaMetadata" : true,
+      "file" : "looping_left.mov",
+      "frameRate" : 24,
+      "height" : 1080,
+      "samples" : [
+        {
+          "cornerAlpha" : 0,
+          "maximumAlpha" : 65535,
+          "minimumAlpha" : 0,
+          "time" : 0,
+          "transparentFraction" : 0.8633116319444445
+        },
+        {
+          "cornerAlpha" : 0,
+          "maximumAlpha" : 65535,
+          "minimumAlpha" : 0,
+          "time" : 5.666666666666667,
+          "transparentFraction" : 0.8633617862654321
+        },
+        {
+          "cornerAlpha" : 0,
+          "maximumAlpha" : 65535,
+          "minimumAlpha" : 0,
+          "time" : 11.291666666666668,
+          "transparentFraction" : 0.8632614776234568
+        }
+      ],
+      "seconds" : 11.333333333333334,
       "width" : 1920
     }
   ],

@@ -3,14 +3,15 @@ import AVFoundation
 
 @main struct ExportAlphaVideos {
     static func main() async throws {
-        guard CommandLine.arguments.count == 3 else {
-            print("Usage: export-alpha-videos INPUT_DIRECTORY OUTPUT_DIRECTORY")
+        guard CommandLine.arguments.count >= 3 else {
+            print("Usage: export-alpha-videos INPUT_DIRECTORY OUTPUT_DIRECTORY [CLIP_NAMES...]")
             return
         }
         let source = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
         let destination = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
-        for name in ["intro", "loop"] {
+        let names = CommandLine.arguments.count > 3 ? Array(CommandLine.arguments.dropFirst(3)) : ["intro", "loop"]
+        for name in names {
             let input = source.appendingPathComponent("\(name).mov")
             let output = destination.appendingPathComponent("\(name).mov")
             let temporary = destination.appendingPathComponent(".\(name)-\(UUID().uuidString).mov")

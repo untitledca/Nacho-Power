@@ -22,9 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let updateMenuItem = NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
         updateMenuItem.target = self
         appMenu.addItem(updateMenuItem)
-        let supportMenuItem = NSMenuItem(title: "Buy me a beer…", action: #selector(openSupport), keyEquivalent: "")
-        supportMenuItem.target = self
-        appMenu.addItem(supportMenuItem)
+        appMenu.addItem(makeSupportMenuItem())
         appMenu.addItem(.separator())
         let quitItem = NSMenuItem(title: "Quit Nacho Power", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appMenu.addItem(quitItem)
@@ -115,9 +113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         check.target = self
         check.isEnabled = updates.state != .checking
         menu.addItem(check)
-        let support = NSMenuItem(title: "Buy me a beer…", action: #selector(openSupport), keyEquivalent: "")
-        support.target = self
-        menu.addItem(support)
+        menu.addItem(makeSupportMenuItem())
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit Nacho Power", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
@@ -153,7 +149,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
     @objc private func quit() { NSApplication.shared.terminate(nil) }
 
-    @objc private func openSupport() { NSWorkspace.shared.open(AppSupportLinks.venmoURL) }
+    private func makeSupportMenuItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "Support Nacho Power", action: nil, keyEquivalent: "")
+        let submenu = NSMenu(title: "Support Nacho Power")
+        addDisabled("Optional one-time support · App stays free", to: submenu)
+        for option in AppSupportLinks.options {
+            let amount = NSMenuItem(title: "\(option.label)…", action: #selector(openSupport(_:)), keyEquivalent: "")
+            amount.target = self
+            amount.representedObject = option.checkoutURL
+            amount.toolTip = "Opens QuickBooks in your browser. Review and confirm payment there."
+            submenu.addItem(amount)
+        }
+        item.submenu = submenu
+        return item
+    }
+
+    @objc private func openSupport(_ sender: NSMenuItem) {
+        guard let url = sender.representedObject as? URL else { return }
+        NSWorkspace.shared.open(url)
+    }
 
     @objc private func downloadUpdate() {
         guard updates.state == .updateAvailable, let release = updates.latestRelease else { return }

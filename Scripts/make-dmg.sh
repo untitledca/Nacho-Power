@@ -22,7 +22,7 @@ if [[ ! -f "$APP_DIR/Contents/Resources/ThirdPartyNotices.txt" ]]; then
     print -u2 "The app is missing its required ThirdPartyNotices.txt. Rebuild before sharing."
     exit 1
 fi
-for clip in intro loop; do
+for clip in intro loop intro_left looping_left; do
     if [[ ! -f "$APP_DIR/Contents/Resources/$clip.mov" ]]; then
         print -u2 "Missing bundled video: $clip.mov"
         exit 1
@@ -41,7 +41,7 @@ cat > "$DMG_STAGE/Install.txt" <<'INSTALL'
 Nacho Power for Mac
 
 Requires macOS 14 or later. Works on Apple silicon and Intel Macs.
-Both cat videos and the app icon are included.
+Both left- and right-side cat video pairs and the app icon are included.
 
 Install
 1. Drag Nacho Power.app onto the Applications folder beside it.
@@ -63,20 +63,22 @@ in the repository README.
 The Dock and menu bar show the EcoFlow battery percentage: green with AC connected,
 red with AC disconnected, and gray when fresh readings are unavailable.
 When AC is disconnected, the intro plays once and the loop repeats.
+Left positions use the left-entry videos; right positions use the original videos.
 Reconnecting AC immediately starts a short pop dismissal, even at 0 W.
 Open Settings to choose an immediate reminder or a battery threshold.
 
 No Terminal, compiler, or developer tools are needed to run Nacho Power.
 
 Updates and support
-Choose Check for Updates in Settings or the menu bar. Automatic checks run
-daily while the app is open and can be turned off in Settings. Download
+Choose Check for Updates in Settings or the menu bar. Enable Check automatically
+for updates in Settings to check now and then daily while the app is open. Download
 the new installer, quit Nacho Power, and replace the app in Applications.
 Your settings are kept. Upgrading from EcoFlow Cat? Quit and remove the old
 EcoFlow Cat.app after installing Nacho Power so only one copy runs.
 Copies older than v1.3.0 need one manual upgrade to get update checks.
-If you like the app, choose Buy me a beer to open @chaseabrams99 on Venmo.
-Tips are optional and you choose the amount.
+Choose Support Nacho Power for optional one-time $5, $10, or $25 USD support
+through QuickBooks. The amount opens in your browser for review and payment.
+The app remains free; supporting development does not unlock features.
 
 First launch
 This build is locally signed and has not been notarized by Apple. If macOS
