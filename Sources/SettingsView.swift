@@ -5,7 +5,7 @@ private let accent = Color(red: 0.40, green: 0.31, blue: 0.65)
 
 struct SettingsView: View {
     @ObservedObject var model: AppModel
-    @ObservedObject var updates: AppUpdateChecker
+    @ObservedObject var updates: AutomaticAppUpdater
     @State private var accountEmail = ""
     @State private var accountPassword = ""
 

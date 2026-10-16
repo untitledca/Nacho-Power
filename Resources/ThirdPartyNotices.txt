@@ -1,4 +1,9 @@
-Nacho Power protocol acknowledgments
+Nacho Power third-party acknowledgments
+
+Automatic updates use Sparkle 2.10.0:
+https://sparkle-project.org/
+Its complete license and component notices are included in Sparkle-LICENSE.txt
+beside this file and in the bundled Sparkle.framework.
 
 USB CDC telemetry framing references r3pcomms:
 https://github.com/greyltc/r3pcomms

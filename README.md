@@ -20,11 +20,19 @@ Requires macOS 14 or newer. The app contains native Apple silicon and Intel bina
 
 ## Updates
 
-Starting with **v1.3.0**, choose **Check for Updates** in Settings or the menu bar to check the latest published GitHub release. Enable **Check automatically for updates** in Settings to check immediately, then once a day while the app is open. The app also checks on launch when a daily check is due, and shows an update notice in the app and menu when a newer release is available. Starting with v1.3.3, automatic checking is off for fresh installs until selected; upgrading preserves your saved choice. You can turn it off at any time.
+Starting with **v1.4.0**, Nacho Power can check, download, install, and relaunch itself using Sparkle. Open **Settings → App updates**:
 
-**Download installer** opens that release's DMG on GitHub. Installer filenames follow `Nacho-Power-VERSION-universal.dmg`. Open the downloaded disk image, quit Nacho Power, and replace the app in Applications. Updates require this installation step; the app does not install or restart itself automatically. The update check reads public release information from GitHub and does not send your EcoFlow credentials, station telemetry, or payment information.
+- **Check automatically for updates** enables daily checks while the app is running. A due check also runs after launch.
+- **Download and install updates automatically** also enables checks. New updates download in the background, then install and relaunch when Settings is closed and no cat reminder or preview is active. Settings and saved EcoFlow sign-in are preserved.
+- **Check for Updates** checks immediately and lets you install through the updater's window.
 
-**Users on v1.2.0 or earlier need to [download and install a newer release](https://github.com/untitledca/Nacho-Power/releases/latest) once** to get the update checker. Those older copies cannot receive an updater retroactively.
+Both automatic options are off on a fresh install until selected. An existing automatic-check preference is preserved as **checking only**; it never silently enables installation. Turning off automatic checks also turns off automatic downloading. Turning off automatic installation stops future automatic downloads and automatic relaunches. An update already downloaded and ready may still install when you quit normally; Settings shows that state.
+
+**Users on v1.3.3 or earlier must [download and install v1.4.0 or later](https://github.com/untitledca/Nacho-Power/releases/latest) once** to get the automatic installer. Their existing Check for Updates button can find the new DMG, but those older copies still need the drag-to-Applications step.
+
+Update feeds and installers are verified using the app's pinned Ed25519 public key before extraction. Checks and downloads use public GitHub URLs; EcoFlow credentials, station telemetry, and payment information are not sent. Install the app in Applications first. macOS may require administrator approval if the installed app cannot be replaced by your user account.
+
+Release maintainers: every new release must include a signed `appcast.xml` alongside the DMG. See [Publishing updates](docs/Publishing-updates.md).
 
 ## Support Nacho Power
 
@@ -71,7 +79,9 @@ Scripts/build.sh
 Scripts/make-dmg.sh
 ```
 
-The build compiles both architectures, bundles resources, and signs locally. The DMG includes drag-to-Applications installation and a SHA-256 checksum. Developer ID signing and Apple notarization require a suitable certificate and Apple Developer access.
+For release-maintainer integration testing, `Scripts/test-automatic-installer.sh` uses isolated test apps and a localhost feed to exercise real DMG replacement/relaunch, deferral, and tamper rejection. It requires the existing release signing key in Keychain and never connects to an EcoFlow or modifies the installed app.
+
+The build downloads checksum-pinned Sparkle 2.10.0 once, compiles both architectures, bundles resources and the updater framework, and signs locally. The DMG includes drag-to-Applications installation and a SHA-256 checksum. Developer ID signing and Apple notarization require a suitable certificate and Apple Developer access.
 
 Reminder tests cover thresholds, AC flicker, missing or stale readings, immediate explicit AC changes, and reconnection at zero watts. Native AppKit playback checks cover intro interruption, repeated loops, preview completion, pop timing, restarting during dismissal, and transparent click-through window behavior. Both supplied video pairs have passed a full intro → two loops → pop run. Side-switch tests cover both directions, preserving intro/loop progress, top/bottom moves, rapid changes, and interruption during dismissal.
 

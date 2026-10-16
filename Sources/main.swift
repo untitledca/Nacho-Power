@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate, NSMenuItemValidation {
     private var statusItem: NSStatusItem!
     private var model: AppModel!
     private var settingsWindow: NSWindow?
@@ -11,8 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var dockLogo: NSImage?
     private var lastDockStatus: DockPowerStatus?
     private var dockRefreshTimer: Timer?
-    private let updates = AppUpdateChecker()
-    private var manualUpdateCheckInProgress = false
+    private let updates = AutomaticAppUpdater()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.regular)
@@ -43,12 +42,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             guard let self else { return }
             updatePowerIndicators()
             if !menuIsOpen { updateMenu() }
+            scheduleAutomaticInstallationReview()
         }
         updatePowerIndicators()
         updateMenu()
         updates.onChange = { [weak self] in
             guard let self else { return }
             if !menuIsOpen { updateMenu() }
+        }
+        updates.installationContext = { [weak self] in
+            guard let self, let model else { return (true, true, true) }
+            return (settingsWindow?.isVisible == true, model.isCatVisible,
+                    menuIsOpen || NSApplication.shared.modalWindow != nil)
         }
         updates.start()
         // A stalled transport must not leave an old green/red percentage in
@@ -81,7 +86,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         return true
     }
     func menuWillOpen(_ menu: NSMenu) { updateMenu(); menuIsOpen = true }
-    func menuDidClose(_ menu: NSMenu) { menuIsOpen = false }
+    func menuDidClose(_ menu: NSMenu) {
+        menuIsOpen = false
+        scheduleAutomaticInstallationReview()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        // isVisible can still be true in windowWillClose. Inspect it after the
+        // close finishes, rather than accidentally leaving the update deferred.
+        scheduleAutomaticInstallationReview()
+    }
+
+    private func scheduleAutomaticInstallationReview() {
+        DispatchQueue.main.async { [weak self] in self?.updates.reevaluateAutomaticInstallation() }
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(checkForUpdates) { return updates.canCheckForUpdates }
+        if menuItem.action == #selector(installUpdate) { return updates.hasPendingInstallation }
+        return true
+    }
 
     private func updateMenu() {
         guard let menu = statusItem?.menu, let model else { return }
@@ -91,11 +115,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if model.isConnected {
             addDisabled("Battery \(model.batteryText)   ·   Input \(model.inputText)", to: menu)
         }
-        if let release = updates.latestRelease, updates.state == .updateAvailable {
-            let download = NSMenuItem(title: "Update available · Download \(release.version)…", action: #selector(downloadUpdate), keyEquivalent: "")
-            download.target = self
-            download.image = NSImage(systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: "Update available")
-            menu.addItem(download)
+        if updates.hasPendingInstallation {
+            let install = NSMenuItem(title: "Install Update & Relaunch…", action: #selector(installUpdate), keyEquivalent: "")
+            install.target = self
+            install.image = NSImage(systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: "Update ready")
+            menu.addItem(install)
+        } else if let version = updates.availableVersion, updates.state == .updateAvailable {
+            let available = NSMenuItem(title: "Update available · \(version)…", action: #selector(checkForUpdates), keyEquivalent: "")
+            available.target = self
+            available.image = NSImage(systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: "Update available")
+            menu.addItem(available)
         }
         menu.addItem(.separator())
         let enabled = NSMenuItem(title: "Enable reminders", action: #selector(toggleEnabled), keyEquivalent: "")
@@ -111,7 +140,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         menu.addItem(.separator())
         let check = NSMenuItem(title: updates.state == .checking ? "Checking for Updates…" : "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
         check.target = self
-        check.isEnabled = updates.state != .checking
+        check.isEnabled = updates.canCheckForUpdates
         menu.addItem(check)
         menu.addItem(makeSupportMenuItem())
         menu.addItem(.separator())
@@ -169,44 +198,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         NSWorkspace.shared.open(url)
     }
 
-    @objc private func downloadUpdate() {
-        guard updates.state == .updateAvailable, let release = updates.latestRelease else { return }
-        NSWorkspace.shared.open(release.downloadURL)
-    }
+    @objc private func installUpdate() { updates.installPendingUpdate() }
 
-    @objc private func checkForUpdates() {
-        guard !manualUpdateCheckInProgress else { return }
-        manualUpdateCheckInProgress = true
-        Task { [weak self] in
-            guard let self else { return }
-            defer { manualUpdateCheckInProgress = false }
-            await updates.checkForUpdates()
-            NSApplication.shared.activate(ignoringOtherApps: true)
-            let alert = NSAlert()
-            alert.alertStyle = .informational
-            if updates.state == .updateAvailable, let release = updates.latestRelease {
-                alert.messageText = "Nacho Power \(release.version) is available"
-                alert.informativeText = "You have version \(updates.currentVersion). Download the new installer, quit Nacho Power, and drag the new app into Applications to replace it. Your settings are kept."
-                alert.addButton(withTitle: "Download Installer")
-                alert.addButton(withTitle: "Not Now")
-                alert.addButton(withTitle: "Release Notes")
-                let response = alert.runModal()
-                if response == .alertFirstButtonReturn { NSWorkspace.shared.open(release.downloadURL) }
-                if response == .alertThirdButtonReturn { NSWorkspace.shared.open(release.releaseURL) }
-            } else if updates.state == .current {
-                alert.messageText = "You’re up to date"
-                alert.informativeText = "Nacho Power \(updates.currentVersion) is installed. No newer release is available."
-                alert.addButton(withTitle: "OK")
-                alert.runModal()
-            } else {
-                alert.messageText = "Couldn’t check for updates"
-                alert.informativeText = updates.errorMessage ?? "Please try again, or open the GitHub releases page."
-                alert.addButton(withTitle: "OK")
-                alert.addButton(withTitle: "Open Releases")
-                if alert.runModal() == .alertSecondButtonReturn { NSWorkspace.shared.open(AppUpdateChecker.releasesURL) }
-            }
-        }
-    }
+    @objc private func checkForUpdates() { updates.checkForUpdates() }
 
     @objc private func showSettings() {
         if settingsWindow == nil {

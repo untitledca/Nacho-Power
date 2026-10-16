@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct AppUpdateSettingsView: View {
-    @ObservedObject var updates: AppUpdateChecker
+    @ObservedObject var updates: AutomaticAppUpdater
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -11,13 +11,22 @@ struct AppUpdateSettingsView: View {
                 Text("Version \(updates.currentVersion)")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
-            Toggle("Check automatically for updates", isOn: $updates.automaticallyChecksForUpdates)
+            Toggle("Check automatically for updates", isOn: Binding(
+                get: { updates.automaticallyChecksForUpdates },
+                set: { updates.setAutomaticChecks($0) }
+            ))
                 .toggleStyle(.switch)
-                .help("Turning this on checks GitHub immediately. After that, Nacho Power checks daily while running and on launch when a check is due.")
-            Text("When enabled, checks now, on launch when due, and daily while Nacho Power is running. You choose when to download and install.")
+                .help("Checks on launch when due and daily while Nacho Power is running.")
+            Toggle("Download and install updates automatically", isOn: Binding(
+                get: { updates.automaticallyInstallsUpdates },
+                set: { updates.setAutomaticInstallation($0) }
+            ))
+                .toggleStyle(.switch)
+                .help("Also enables automatic checks. Downloads verified updates, then installs and relaunches when Settings is closed and no cat is showing.")
+            Text("Checks daily while running and on launch when due. Automatic installation downloads the update, then relaunches Nacho Power when Settings is closed and the cat is hidden. Your settings are kept.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            Text(statusText)
+            Text(updates.statusText)
                 .font(.system(size: 12))
                 .foregroundStyle(updates.state == .unavailable ? Color.orange : Color.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -27,32 +36,19 @@ struct AppUpdateSettingsView: View {
             }
             HStack {
                 Button(updates.state == .checking ? "Checking…" : "Check for Updates") {
-                    Task { await updates.checkForUpdates() }
-                }.disabled(updates.state == .checking)
+                    updates.checkForUpdates()
+                }.disabled(!updates.canCheckForUpdates)
                 Spacer()
-                if updates.state == .updateAvailable, let release = updates.latestRelease {
-                    Link("Download \(release.version)", destination: release.downloadURL)
+                if updates.hasPendingInstallation {
+                    Button("Install & Relaunch") { updates.installPendingUpdate() }
                         .buttonStyle(.borderedProminent)
                 } else {
-                    Link("GitHub releases", destination: AppUpdateChecker.releasesURL)
+                    Link("Release notes", destination: AutomaticAppUpdater.releasesURL)
                 }
             }
-            if updates.state == .updateAvailable, let release = updates.latestRelease {
-                Text("Download the installer, quit Nacho Power, then replace the app in Applications. Your settings are kept.")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Link("What’s new", destination: release.releaseURL).font(.system(size: 11))
-            }
-        }
-    }
-
-    private var statusText: String {
-        switch updates.state {
-        case .notChecked: return "No update check yet."
-        case .checking: return "Checking GitHub for the latest version…"
-        case .current: return "You’re up to date."
-        case .updateAvailable: return "A new version of Nacho Power is ready."
-        case .unavailable: return updates.errorMessage ?? "Couldn’t check right now. Try again or open GitHub releases."
+            Text("macOS may request permission if the app cannot be replaced automatically.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

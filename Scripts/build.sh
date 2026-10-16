@@ -4,6 +4,7 @@ SCRIPT_DIR="${0:A:h}"
 PROJECT_DIR="${SCRIPT_DIR:h}"
 APP_DIR="$PROJECT_DIR/dist/Nacho Power.app"
 ASSET_DIR="${1:-$PROJECT_DIR/Assets}"
+SPARKLE_DIR=$("$SCRIPT_DIR/fetch-sparkle.sh")
 mkdir -p "$PROJECT_DIR/.build" "$PROJECT_DIR/dist"
 if [[ ! -f "$PROJECT_DIR/Resources/ThirdPartyNotices.txt" ]]; then
     print -u2 "Missing required distribution resource: ThirdPartyNotices.txt"
@@ -20,7 +21,9 @@ done
 BUILD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ecoflow-build.XXXXXX")
 trap 'rm -rf "$BUILD_DIR"' EXIT
 BUILD_APP_DIR="$BUILD_DIR/Nacho Power.app"
-mkdir -p "$BUILD_APP_DIR/Contents/MacOS" "$BUILD_APP_DIR/Contents/Resources"
+mkdir -p "$BUILD_APP_DIR/Contents/MacOS" "$BUILD_APP_DIR/Contents/Resources" "$BUILD_APP_DIR/Contents/Frameworks"
+# Keep Sparkle's signed nested installer helpers and framework symlinks intact.
+ditto --noextattr --norsrc "$SPARKLE_DIR/Sparkle.framework" "$BUILD_APP_DIR/Contents/Frameworks/Sparkle.framework"
 BINARIES=()
 for architecture in arm64 x86_64; do
     binary="$BUILD_DIR/NachoPower-$architecture"
@@ -29,6 +32,8 @@ for architecture in arm64 x86_64; do
         -c "$PROJECT_DIR/Sources/EcoFlowCrypto.c" -o "$crypto"
     xcrun swiftc -swift-version 5 -O -target "$architecture-apple-macos14.0" \
         -module-cache-path "$PROJECT_DIR/.build/module-cache-$architecture" \
+        -F "$SPARKLE_DIR" -framework Sparkle \
+        -Xlinker -rpath -Xlinker @executable_path/../Frameworks \
         "$PROJECT_DIR"/Sources/*.swift "$crypto" -o "$binary"
     BINARIES+=("$binary")
 done
@@ -58,6 +63,17 @@ xattr -dr com.apple.FinderInfo "$BUILD_APP_DIR" 2>/dev/null || true
 xattr -dr com.apple.ResourceFork "$BUILD_APP_DIR" 2>/dev/null || true
 codesign --force --sign - "$BUILD_APP_DIR"
 codesign --verify --deep --strict "$BUILD_APP_DIR"
+for component in Sparkle Autoupdate Updater.app/Contents/MacOS/Updater XPCServices/Installer.xpc/Contents/MacOS/Installer XPCServices/Downloader.xpc/Contents/MacOS/Downloader; do
+    slices=$(xcrun lipo -archs "$BUILD_APP_DIR/Contents/Frameworks/Sparkle.framework/Versions/B/$component")
+    if [[ " $slices " != *" arm64 "* || " $slices " != *" x86_64 "* ]]; then
+        print -u2 "Sparkle component is not universal: $component"
+        exit 1
+    fi
+done
+if ! otool -L "$BUILD_APP_DIR/Contents/MacOS/NachoPower" | grep -q '@rpath/Sparkle.framework/Versions/B/Sparkle'; then
+    print -u2 "The app does not link its bundled Sparkle updater."
+    exit 1
+fi
 # Keep the previous app intact until both architectures and resources validate.
 if [[ -e "$APP_DIR" ]]; then
     mv "$APP_DIR" "$BUILD_DIR/previous.app"

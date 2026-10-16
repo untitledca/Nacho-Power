@@ -70,12 +70,15 @@ Open Settings to choose an immediate reminder or a battery threshold.
 No Terminal, compiler, or developer tools are needed to run Nacho Power.
 
 Updates and support
-Choose Check for Updates in Settings or the menu bar. Enable Check automatically
-for updates in Settings to check now and then daily while the app is open. Download
-the new installer, quit Nacho Power, and replace the app in Applications.
+Choose Check for Updates in Settings or the menu bar to install an update.
+In App updates, enable Check automatically for updates for daily checks.
+Also enable Download and install updates automatically for hands-free updates.
+Both are optional. Automatic installation waits until Settings is closed and
+no cat reminder or preview is active, then installs and relaunches the app.
+An already downloaded update can also finish when you quit normally.
 Your settings are kept. Upgrading from EcoFlow Cat? Quit and remove the old
 EcoFlow Cat.app after installing Nacho Power so only one copy runs.
-Copies older than v1.3.0 need one manual upgrade to get update checks.
+Copies older than v1.4.0 need one manual upgrade to get the automatic installer.
 Choose Support Nacho Power for optional one-time $5, $10, or $25 USD support
 through QuickBooks. The amount opens in your browser for review and payment.
 The app remains free; supporting development does not unlock features.

@@ -44,6 +44,14 @@ xcrun swiftc -parse-as-library -swift-version 5 "$PROJECT_DIR/Sources/EcoFlowAcc
 xcrun swiftc -parse-as-library -swift-version 5 "$PROJECT_DIR/Sources/AppUpdateChecker.swift" "$PROJECT_DIR/Tests/AppUpdateChecks.swift" -o "$PROJECT_DIR/.build/app-update-checks"
 "$PROJECT_DIR/.build/app-update-checks"
 
+# The production installation policy is deterministic and does not load Sparkle
+# or contact an update server. Actual installer integration is checked separately.
+xcrun swiftc -parse-as-library -swift-version 5 \
+    "$PROJECT_DIR/Sources/AutomaticUpdatePolicy.swift" \
+    "$PROJECT_DIR/Tests/AutomaticUpdateChecks.swift" \
+    -o "$PROJECT_DIR/.build/automatic-update-checks"
+"$PROJECT_DIR/.build/automatic-update-checks"
+
 # Session state uses the production parser and routing rules without BLE hardware.
 xcrun swiftc -parse-as-library -swift-version 5 \
     "$PROJECT_DIR/Sources/TelemetryModels.swift" \
