@@ -64,6 +64,8 @@ The Dock and menu bar show the EcoFlow battery percentage: green with AC connect
 red with AC disconnected, and gray when fresh readings are unavailable.
 When AC is disconnected, the intro plays once and the loop repeats.
 Left positions use the left-entry videos; right positions use the original videos.
+Full-screen fitting has its own From Right / From Left direction control.
+Choose Main display, a named monitor, or All displays in Settings.
 Reconnecting AC immediately starts a short pop dismissal, even at 0 W.
 Open Settings to choose an immediate reminder or a battery threshold.
 

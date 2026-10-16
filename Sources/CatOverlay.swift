@@ -23,9 +23,206 @@ enum OverlayCorner: String, CaseIterable {
 enum OverlayVideoSide: String, CaseIterable {
     case left, right
 
+    var title: String { self == .left ? "From Left" : "From Right" }
+
     var intro: String { self == .left ? "intro_left" : "intro" }
     var loop: String { self == .left ? "looping_left" : "loop" }
     var clips: [String] { [intro, loop] }
+}
+
+/// One player per display: AVPlayer cannot render into several player layers at
+/// once. The coordinator owns the single reminder/preview lifecycle and keeps
+/// display changes from restarting a clip or dismissing only one of the cats.
+@MainActor
+final class CatOverlayController {
+    enum PlaybackState: String { case hidden, intro, loop, dismissing }
+    var onPlaybackError: ((String) -> Void)?
+    var onVisibilityChanged: ((Bool) -> Void)?
+    var onDismissalFinished: (() -> Void)?
+
+    private let assetDirectory: URL
+    private let displays: @MainActor () -> [OverlayDisplay]
+    private var surfaces: [String: CatOverlaySurface] = [:]
+    private var displayOrder: [String] = []
+    private var screenObserver: NSObjectProtocol?
+    private var width: CGFloat = 320
+    private var corner: OverlayCorner = .bottomRight
+    private var fullScreen = true
+    private var fullScreenSide: OverlayVideoSide = .right
+    private var displaySelection = OverlayDisplaySelection.main
+    private var wantsPlayback = false
+    private var previewRequested = false
+    private var dismissing = false
+    private var reconciling = false
+    private var lastVisibility = false
+    private var suspendedSnapshot: OverlayPlaybackSnapshot?
+
+    var isVisible: Bool { surfaces.values.contains { $0.isVisible || $0.isStarting } }
+    var isPreviewing: Bool { previewRequested && !dismissing }
+    var playbackState: PlaybackState {
+        if dismissing { return .dismissing }
+        return leadingSurface?.playbackState ?? suspendedSnapshot?.phase ?? .hidden
+    }
+    private var selectedSide: OverlayVideoSide { fullScreen ? fullScreenSide : corner.videoSide }
+    private var leadingSurface: CatOverlaySurface? {
+        displayOrder.compactMap { surfaces[$0] }.first(where: { $0.playbackState != .hidden })
+            ?? displayOrder.compactMap { surfaces[$0] }.first
+    }
+
+    init(assetDirectory: URL, displays: @escaping @MainActor () -> [OverlayDisplay] = { OverlayDisplay.availableDisplays }) {
+        self.assetDirectory = assetDirectory
+        self.displays = displays
+        screenObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshDisplays() }
+        }
+        refreshDisplays()
+    }
+
+    /// screenIndex remains for older callers; saved settings now use stable IDs.
+    func updateAppearance(width: CGFloat, corner: OverlayCorner, screenIndex: Int = 0,
+                          fullScreen: Bool = true, fullScreenSide: OverlayVideoSide? = nil,
+                          displaySelection: String = OverlayDisplaySelection.main) {
+        self.width = width
+        self.corner = corner
+        self.fullScreen = fullScreen
+        self.fullScreenSide = fullScreenSide ?? corner.videoSide
+        let connected = displays()
+        self.displaySelection = displaySelection == OverlayDisplaySelection.main && screenIndex > 0 && connected.indices.contains(screenIndex)
+            ? connected[screenIndex].id : displaySelection
+        refreshDisplays()
+    }
+
+    /// Reconcile monitor geometry and membership without replaying the intro.
+    func refreshDisplays() {
+        let targets = OverlayDisplaySelection.selectedDisplays(for: displaySelection, from: displays())
+        let snapshot = leadingSurface?.snapshot ?? suspendedSnapshot
+        reconciling = true
+        defer {
+            reconciling = false
+            publishVisibility()
+            finishDismissalIfReady()
+        }
+        let ids = Set(targets.map(\.id))
+        // Keep the original players on retained displays, even if macOS changes
+        // the enumeration order. Newly connected displays join the saved phase.
+        for display in targets {
+            if let existing = surfaces[display.id] {
+                existing.updateAppearance(width: width, corner: corner, display: display,
+                                          fullScreen: fullScreen, side: selectedSide)
+            } else if !dismissing {
+                let surface = makeSurface(display)
+                surfaces[display.id] = surface
+                surface.updateAppearance(width: width, corner: corner, display: display,
+                                         fullScreen: fullScreen, side: selectedSide)
+                if wantsPlayback {
+                    if let snapshot { surface.resume(snapshot) }
+                    else if previewRequested { surface.preview() }
+                    else { surface.startReminder() }
+                }
+            }
+        }
+        for id in Array(surfaces.keys) where !ids.contains(id) {
+            surfaces.removeValue(forKey: id)?.hide()
+        }
+        displayOrder = targets.map(\.id)
+        suspendedSnapshot = targets.isEmpty && wantsPlayback ? snapshot : nil
+    }
+
+    func startReminder() {
+        guard !wantsPlayback || dismissing || previewRequested else { return }
+        start(preview: false)
+    }
+
+    func preview() { start(preview: true) }
+
+    private func start(preview: Bool) {
+        hide()
+        wantsPlayback = true
+        previewRequested = preview
+        refreshDisplays()
+        reconciling = true
+        for surface in Array(surfaces.values) {
+            guard wantsPlayback else { break }
+            if preview { surface.preview() } else { surface.startReminder() }
+        }
+        reconciling = false
+        publishVisibility()
+    }
+
+    func finishReminder() {
+        guard wantsPlayback, !dismissing else { return }
+        dismissing = true
+        previewRequested = false
+        // All surfaces pause and start the same pop in this main-actor turn.
+        for surface in Array(surfaces.values) { surface.finishReminder() }
+        finishDismissalIfReady()
+    }
+
+    func hide() {
+        wantsPlayback = false
+        previewRequested = false
+        dismissing = false
+        suspendedSnapshot = nil
+        reconciling = true
+        for surface in Array(surfaces.values) { surface.hide() }
+        reconciling = false
+        publishVisibility()
+    }
+
+    private func makeSurface(_ display: OverlayDisplay) -> CatOverlaySurface {
+        let surface = CatOverlaySurface(assetDirectory: assetDirectory, display: display)
+        surface.onPlaybackError = { [weak self] error in
+            guard let self else { return }
+            hide()
+            onPlaybackError?(error)
+        }
+        surface.onVisibilityChanged = { [weak self] _ in
+            guard let self, !reconciling else { return }
+            publishVisibility()
+        }
+        surface.onPreviewFinished = { [weak self] in self?.finishReminder() }
+        surface.onDismissalFinished = { [weak self] in self?.finishDismissalIfReady() }
+        return surface
+    }
+
+    private func finishDismissalIfReady() {
+        guard dismissing, !reconciling, !isVisible else { return }
+        wantsPlayback = false
+        dismissing = false
+        suspendedSnapshot = nil
+        publishVisibility()
+        onDismissalFinished?()
+    }
+
+    private func publishVisibility() {
+        let visible = isVisible
+        guard visible != lastVisibility else { return }
+        lastVisibility = visible
+        onVisibilityChanged?(visible)
+    }
+
+    var diagnostics: [String: Any] {
+        var result = leadingSurface?.diagnostics ?? [:]
+        result["visible"] = isVisible
+        result["playbackState"] = playbackState.rawValue
+        result["selectedSide"] = selectedSide.rawValue
+        result["displaySelection"] = displaySelection
+        result["displayCount"] = surfaces.count
+        result["displays"] = displayOrder.compactMap { surfaces[$0]?.diagnostics }
+        return result
+    }
+
+    deinit {
+        if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
+    }
+}
+
+private struct OverlayPlaybackSnapshot {
+    let phase: CatOverlayController.PlaybackState
+    let fraction: Double
+    let previewLoops: Int?
 }
 
 private final class CatOverlayPanel: NSPanel {
@@ -33,8 +230,25 @@ private final class CatOverlayPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
+enum OverlayCanvasLayout {
+    static func frame(in bounds: CGRect, aspect: CGFloat, side: OverlayVideoSide,
+                      fullScreen: Bool) -> CGRect {
+        guard fullScreen else { return bounds }
+        let safeAspect = aspect.isFinite && aspect > 0 ? aspect : 16.0 / 9.0
+        // Keep the entire canvas on portrait displays instead of cropping a
+        // landscape clip to fill their height. Extra space stays transparent.
+        let width = min(max(0, bounds.width), max(0, bounds.height) * safeAspect)
+        let height = width / safeAspect
+        return CGRect(x: side == .left ? bounds.minX : bounds.maxX - width,
+                      y: bounds.minY, width: width, height: height)
+    }
+}
+
 private final class CatVideoView: NSView {
     let playerLayer = AVPlayerLayer()
+    var fitEntireCanvas = false
+    var videoAspect: CGFloat = 16.0 / 9.0
+    var videoSide: OverlayVideoSide = .right
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -55,7 +269,8 @@ private final class CatVideoView: NSView {
         super.layout()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        playerLayer.frame = bounds
+        playerLayer.frame = OverlayCanvasLayout.frame(in: bounds, aspect: videoAspect,
+                                                       side: videoSide, fullScreen: fitEntireCanvas)
         CATransaction.commit()
     }
 }
@@ -63,14 +278,16 @@ private final class CatVideoView: NSView {
 /// Uses AVFoundation's native video layers and decoder, with no frame-copy timer.
 /// Bundle assets should be HEVC with alpha, converted once from the user's ProRes masters.
 @MainActor
-final class CatOverlayController {
-    enum PlaybackState: String { case hidden, intro, loop, dismissing }
+private final class CatOverlaySurface {
+    typealias PlaybackState = CatOverlayController.PlaybackState
 
     var onPlaybackError: ((String) -> Void)?
     var onVisibilityChanged: ((Bool) -> Void)?
     var onDismissalFinished: (() -> Void)?
+    var onPreviewFinished: (() -> Void)?
     private(set) var playbackState: PlaybackState = .hidden
     var isVisible: Bool { panel.isVisible }
+    var isStarting: Bool { pendingResume != nil }
     var isPreviewing: Bool { previewLoopTarget != nil }
 
     private let panel: CatOverlayPanel
@@ -82,7 +299,6 @@ final class CatOverlayController {
     private var statusObservations: [NSKeyValueObservation] = []
     private var endObserver: NSObjectProtocol?
     private var failureObserver: NSObjectProtocol?
-    private var screenObserver: NSObjectProtocol?
     private var previewLoopTarget: Int?
     private var previewTimeObserver: Any?
     private var generation = 0
@@ -90,11 +306,14 @@ final class CatOverlayController {
     private var activeSide: OverlayVideoSide?
     private var width: CGFloat = 320
     private var corner: OverlayCorner = .bottomRight
-    private var screenIndex = 0
+    private var display: OverlayDisplay
+    private var selectedSide: OverlayVideoSide = .right
+    private var pendingResume: OverlayPlaybackSnapshot?
     private var fullScreen = true
     private var aspectRatios: [OverlayVideoSide: CGFloat] = [:]
 
-    init(assetDirectory: URL) {
+    init(assetDirectory: URL, display: OverlayDisplay) {
+        self.display = display
         assets = Dictionary(uniqueKeysWithValues: OverlayVideoSide.allCases.flatMap(\.clips).map {
             ($0, AVURLAsset(url: assetDirectory.appendingPathComponent("\($0).mov")))
         })
@@ -132,10 +351,6 @@ final class CatOverlayController {
                 self.failed("Unable to play cat video: \(item.error?.localizedDescription ?? "playback stopped unexpectedly")")
             }
         }
-        screenObserver = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
-                                                                 object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.positionPanel() }
-        }
         positionPanel()
         for side in OverlayVideoSide.allCases {
             if let asset = assets[side.loop] {
@@ -149,15 +364,47 @@ final class CatOverlayController {
         }
     }
 
-    func updateAppearance(width: CGFloat, corner: OverlayCorner, screenIndex: Int = 0, fullScreen: Bool = true) {
-        let previousSide = self.corner.videoSide
+    func updateAppearance(width: CGFloat, corner: OverlayCorner, display: OverlayDisplay,
+                          fullScreen: Bool, side: OverlayVideoSide) {
+        let previousSide = selectedSide
         self.width = min(1000, max(160, width))
         self.corner = corner
-        self.screenIndex = screenIndex
+        self.display = display
         self.fullScreen = fullScreen
+        selectedSide = side
         positionPanel()
-        if previousSide != corner.videoSide, playbackState == .intro || playbackState == .loop {
-            switchVideoSide()
+        if previousSide != selectedSide {
+            if let snapshot = pendingResume { resume(snapshot) }
+            else if playbackState == .intro || playbackState == .loop { switchVideoSide() }
+        }
+    }
+
+    var snapshot: OverlayPlaybackSnapshot? {
+        if let pendingResume { return pendingResume }
+        guard playbackState == .intro || playbackState == .loop else { return nil }
+        return OverlayPlaybackSnapshot(phase: playbackState, fraction: playbackFraction,
+            previewLoops: previewLoopTarget.map { max(0, $0 - (looper?.loopCount ?? 0)) })
+    }
+
+    /// A newly selected/connected display joins the existing phase and progress.
+    func resume(_ snapshot: OverlayPlaybackSnapshot) {
+        hide()
+        pendingResume = snapshot
+        let expectedGeneration = generation
+        let side = selectedSide
+        sideSwitchTask = Task { [weak self] in
+            guard let self else { return }
+            let clip = snapshot.phase == .intro ? side.intro : side.loop
+            let duration = (try? await assets[clip]?.load(.duration))?.seconds ?? 0
+            guard !Task.isCancelled, generation == expectedGeneration, selectedSide == side else { return }
+            pendingResume = nil
+            sideSwitchTask = nil
+            let time = duration.isFinite && duration > 0 ? min(0.999999, snapshot.fraction) * duration : 0
+            guard configurePlayback(side: side, phase: snapshot.phase,
+                                    previewLoops: snapshot.previewLoops, seekTo: time) else { return }
+            positionPanel()
+            panel.orderFrontRegardless()
+            onVisibilityChanged?(true)
         }
     }
 
@@ -172,9 +419,11 @@ final class CatOverlayController {
 
     /// AC reconnects: stop either video immediately, then pop the frozen image away.
     func finishReminder() {
+        if pendingResume != nil { hide(); return }
         guard playbackState != .hidden, playbackState != .dismissing else { return }
         sideSwitchTask?.cancel()
         sideSwitchTask = nil
+        pendingResume = nil
         stopPreviewObserver()
         playbackState = .dismissing
         player.pause()
@@ -218,6 +467,7 @@ final class CatOverlayController {
         generation += 1
         sideSwitchTask?.cancel()
         sideSwitchTask = nil
+        pendingResume = nil
         stopPreviewObserver()
         player.pause()
         videoView.playerLayer.removeAnimation(forKey: "dismissalPop")
@@ -247,7 +497,7 @@ final class CatOverlayController {
          "fullscreenAuxiliary": panel.collectionBehavior.contains(.fullScreenAuxiliary),
          "allApplications": panel.collectionBehavior.rawValue & (1 << 18) != 0,
          "playbackState": playbackState.rawValue,
-         "selectedSide": corner.videoSide.rawValue,
+         "selectedSide": selectedSide.rawValue,
          "activeSide": activeSide?.rawValue ?? "none",
          "currentVideo": (player.currentItem?.asset as? AVURLAsset)?.url.lastPathComponent ?? "none",
          "playbackTime": player.currentTime().seconds.isFinite ? player.currentTime().seconds : 0,
@@ -256,10 +506,12 @@ final class CatOverlayController {
          "previewLoopsRemaining": previewLoopTarget.map { max(0, $0 - (looper?.loopCount ?? 0)) } ?? -1,
          "mirrored": videoView.playerLayer.transform.m11 < 0,
          "fullScreen": fullScreen,
-         "screenIndex": screenIndex,
+         "displayID": display.id,
+         "displayName": display.name,
          "videoReady": videoView.playerLayer.isReadyForDisplay,
          "playerStatus": player.status.rawValue,
          "windowFrame": NSStringFromRect(panel.frame),
+         "videoFrame": NSStringFromRect(videoView.playerLayer.frame),
          "muted": player.isMuted,
          "playerRate": player.rate,
          "hasPopAnimation": videoView.playerLayer.animation(forKey: "dismissalPop") != nil,
@@ -268,7 +520,7 @@ final class CatOverlayController {
 
     private func start(previewLoops: Int?) {
         hide()
-        guard configurePlayback(side: corner.videoSide, phase: .intro, previewLoops: previewLoops) else { return }
+        guard configurePlayback(side: selectedSide, phase: .intro, previewLoops: previewLoops) else { return }
         positionPanel()
         panel.orderFrontRegardless()
         onVisibilityChanged?(true)
@@ -284,13 +536,13 @@ final class CatOverlayController {
     /// and moving between top/bottom on the same side does not touch the queue.
     private func switchVideoSide() {
         sideSwitchTask?.cancel()
-        let side = corner.videoSide
+        let side = selectedSide
         player.pause()
         sideSwitchTask = Task { [weak self] in
             guard let self else { return }
             let introDuration = (try? await assets[side.intro]?.load(.duration))?.seconds ?? 0
             let loopDuration = (try? await assets[side.loop]?.load(.duration))?.seconds ?? 0
-            guard !Task.isCancelled, corner.videoSide == side,
+            guard !Task.isCancelled, selectedSide == side,
                   playbackState == .intro || playbackState == .loop else { return }
             // Read the phase after loading: a queued end-of-intro callback may have
             // advanced the player just before it was paused for this replacement.
@@ -299,7 +551,7 @@ final class CatOverlayController {
             let time = duration.isFinite && duration > 0 ? min(0.999999, playbackFraction) * duration : 0
             let remainingLoops = previewLoopTarget.map { max(0, $0 - (self.looper?.loopCount ?? 0)) }
             if remainingLoops == 0 {
-                finishReminder()
+                onPreviewFinished?()
                 return
             }
             sideSwitchTask = nil
@@ -340,7 +592,7 @@ final class CatOverlayController {
                 MainActor.assumeIsolated {
                     guard let self, self.playbackState == .loop,
                           let count = self.looper?.loopCount, count >= target else { return }
-                    self.finishReminder()
+                    self.onPreviewFinished?()
                 }
             }
         }
@@ -350,7 +602,7 @@ final class CatOverlayController {
                 DispatchQueue.main.async {
                     guard let self, self.generation == expectedGeneration,
                           self.playbackState == .intro || self.playbackState == .loop,
-                          self.corner.videoSide == self.activeSide else { return }
+                          self.selectedSide == self.activeSide else { return }
                     self.player.play()
                 }
             }
@@ -402,19 +654,25 @@ final class CatOverlayController {
         onPlaybackError?(message)
     }
 
+    deinit {
+        sideSwitchTask?.cancel()
+        if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+        if let failureObserver { NotificationCenter.default.removeObserver(failureObserver) }
+    }
+
     private func positionPanel() {
-        let screens = NSScreen.screens
-        guard !screens.isEmpty else { return }
-        let screen = screens.indices.contains(screenIndex) ? screens[screenIndex] : screens[0]
-        videoView.playerLayer.videoGravity = fullScreen ? .resizeAspectFill : .resizeAspect
+        videoView.playerLayer.videoGravity = .resizeAspect
+        videoView.fitEntireCanvas = fullScreen
+        videoView.videoAspect = aspectRatios[activeSide ?? selectedSide] ?? (16.0 / 9.0)
+        videoView.videoSide = activeSide ?? selectedSide
         if fullScreen {
-            panel.setFrame(screen.frame, display: true)
+            panel.setFrame(display.frame, display: true)
             videoView.needsLayout = true
             return
         }
-        let available = screen.visibleFrame
-        let displayWidth = min(width, available.width - 32)
-        let aspectRatio = aspectRatios[activeSide ?? corner.videoSide] ?? (16.0 / 9.0)
+        let available = display.visibleFrame
+        let displayWidth = max(1, min(width, available.width - 32, (available.height - 32) * (aspectRatios[activeSide ?? selectedSide] ?? (16.0 / 9.0))))
+        let aspectRatio = aspectRatios[activeSide ?? selectedSide] ?? (16.0 / 9.0)
         let displayHeight = displayWidth / aspectRatio
         let inset: CGFloat = 16
         let left = corner == .bottomLeft || corner == .topLeft

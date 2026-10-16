@@ -22,9 +22,17 @@ final class AppModel: ObservableObject {
     @Published var fullScreen: Bool {
         didSet { defaults.set(fullScreen, forKey: "fullScreenAnimation"); updateAppearance() }
     }
-    @Published var screenIndex: Int {
-        didSet { defaults.set(screenIndex, forKey: "animationDisplay"); updateAppearance() }
+    @Published var fullScreenSide: OverlayVideoSide {
+        didSet { defaults.set(fullScreenSide.rawValue, forKey: "fullScreenAnimationSide"); updateAppearance() }
     }
+    @Published var displaySelection: String {
+        didSet {
+            defaults.set(displaySelection, forKey: OverlayDisplaySelection.defaultsKey)
+            rememberSelectedDisplayName()
+            updateAppearance()
+        }
+    }
+    @Published private(set) var availableDisplays: [OverlayDisplay]
     @Published var transport: EcoFlowTransport = .automatic
     @Published var bluetoothUserID = ""
     @Published var serialNumber = ""
@@ -56,6 +64,7 @@ final class AppModel: ObservableObject {
     private var isStopped = true
     private var monitoringGeneration = 0
     private var isPolling = false
+    private var screenObserver: NSObjectProtocol?
 
     init(assetDirectory: URL, defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -76,9 +85,15 @@ final class AppModel: ObservableObject {
         immediate = defaults.bool(forKey: "immediateTrigger")
         threshold = min(100, max(1, defaults.double(forKey: "batteryThreshold")))
         catWidth = min(1000, max(240, defaults.double(forKey: "catWidth")))
-        corner = OverlayCorner(rawValue: defaults.string(forKey: "catCorner") ?? "") ?? .bottomRight
+        let savedCorner = OverlayCorner(rawValue: defaults.string(forKey: "catCorner") ?? "") ?? .bottomRight
+        corner = savedCorner
         fullScreen = defaults.bool(forKey: "fullScreenAnimation")
-        screenIndex = max(0, defaults.integer(forKey: "animationDisplay"))
+        let savedFullScreenSide = OverlayVideoSide(rawValue: defaults.string(forKey: "fullScreenAnimationSide") ?? "") ?? savedCorner.videoSide
+        fullScreenSide = savedFullScreenSide
+        defaults.set(savedFullScreenSide.rawValue, forKey: "fullScreenAnimationSide")
+        let displays = OverlayDisplay.availableDisplays
+        availableDisplays = displays
+        displaySelection = OverlayDisplaySelection.initialSelection(defaults: defaults, displays: displays)
         overlay = CatOverlayController(assetDirectory: assetDirectory)
         appliedConfiguration = connectionConfiguration
         assetWarning = Self.readAssetWarning(in: assetDirectory)
@@ -101,8 +116,37 @@ final class AppModel: ObservableObject {
             engine.dismissalDidFinish()
             refreshStatus()
         }
+        screenObserver = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
+                                                                object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.availableDisplays = OverlayDisplay.availableDisplays
+                self.rememberSelectedDisplayName()
+                self.updateAppearance()
+            }
+        }
+        rememberSelectedDisplayName()
         updateAppearance()
         applySettings()
+    }
+
+    deinit {
+        if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
+    }
+
+    var selectedDisplayIsUnavailable: Bool {
+        displaySelection != OverlayDisplaySelection.main && displaySelection != OverlayDisplaySelection.all
+            && !availableDisplays.contains(where: { $0.id == displaySelection })
+    }
+
+    var unavailableDisplayName: String {
+        defaults.string(forKey: OverlayDisplaySelection.displayNameDefaultsKey) ?? "Selected display"
+    }
+
+    private func rememberSelectedDisplayName() {
+        if let display = availableDisplays.first(where: { $0.id == displaySelection }) {
+            defaults.set(display.name, forKey: OverlayDisplaySelection.displayNameDefaultsKey)
+        }
     }
 
     var batteryText: String { telemetry?.batteryPercentage.map { "\(Int($0.rounded()))%" } ?? "—" }
@@ -304,7 +348,8 @@ final class AppModel: ObservableObject {
 
     private func updateAppearance() {
         overlay.updateAppearance(width: CGFloat(catWidth), corner: corner,
-                                 screenIndex: screenIndex, fullScreen: fullScreen)
+                                 fullScreen: fullScreen, fullScreenSide: fullScreenSide,
+                                 displaySelection: displaySelection)
     }
 
     private func poll() async {

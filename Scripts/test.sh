@@ -52,6 +52,21 @@ xcrun swiftc -parse-as-library -swift-version 5 \
     -o "$PROJECT_DIR/.build/automatic-update-checks"
 "$PROJECT_DIR/.build/automatic-update-checks"
 
+# Display targeting and migration use synthetic descriptors without opening windows.
+xcrun swiftc -parse-as-library -swift-version 5 \
+    "$PROJECT_DIR/Sources/OverlayDisplaySelection.swift" \
+    "$PROJECT_DIR/Tests/DisplaySelectionChecks.swift" \
+    -o "$PROJECT_DIR/.build/display-selection-checks"
+"$PROJECT_DIR/.build/display-selection-checks"
+
+# Pure canvas geometry; this test does not create an app, player, or window.
+xcrun swiftc -parse-as-library -swift-version 5 \
+    "$PROJECT_DIR/Sources/OverlayDisplaySelection.swift" \
+    "$PROJECT_DIR/Sources/CatOverlay.swift" \
+    "$PROJECT_DIR/Tests/OverlayLayoutChecks.swift" \
+    -o "$PROJECT_DIR/.build/overlay-layout-checks"
+"$PROJECT_DIR/.build/overlay-layout-checks"
+
 # Session state uses the production parser and routing rules without BLE hardware.
 xcrun swiftc -parse-as-library -swift-version 5 \
     "$PROJECT_DIR/Sources/TelemetryModels.swift" \

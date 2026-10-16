@@ -74,16 +74,33 @@ struct SettingsView: View {
                 Text("On your desktop").font(.system(size: 14, weight: .semibold))
                 Toggle("Fit animation across the entire screen", isOn: $model.fullScreen)
                     .toggleStyle(.switch)
-                if NSScreen.screens.count > 1 {
+                if model.fullScreen {
                     HStack {
-                        Text("Display").foregroundStyle(.secondary)
+                        Text("Direction").foregroundStyle(.secondary)
                         Spacer()
-                        Picker("Display", selection: $model.screenIndex) {
-                            ForEach(Array(NSScreen.screens.enumerated()), id: \.offset) { index, screen in
-                                Text("\(index + 1) · \(Int(screen.frame.width)) × \(Int(screen.frame.height))").tag(index)
-                            }
+                        Picker("Animation direction", selection: $model.fullScreenSide) {
+                            Text(OverlayVideoSide.right.title).tag(OverlayVideoSide.right)
+                            Text(OverlayVideoSide.left.title).tag(OverlayVideoSide.left)
                         }.labelsHidden().frame(width: 190)
                     }
+                }
+                HStack {
+                    Text("Display").foregroundStyle(.secondary)
+                    Spacer()
+                    Picker("Display", selection: $model.displaySelection) {
+                        Text("Main display").tag(OverlayDisplaySelection.main)
+                        ForEach(model.availableDisplays) { display in
+                            Text(display.name).tag(display.id)
+                        }
+                        Text("All displays").tag(OverlayDisplaySelection.all)
+                        if model.selectedDisplayIsUnavailable {
+                            Text("\(model.unavailableDisplayName) (disconnected)").tag(model.displaySelection)
+                        }
+                    }.labelsHidden().frame(width: 240)
+                }
+                if model.selectedDisplayIsUnavailable {
+                    Text("The selected display is disconnected. The cat appears on the main display until it reconnects.")
+                        .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 if !model.fullScreen {
                     HStack {
