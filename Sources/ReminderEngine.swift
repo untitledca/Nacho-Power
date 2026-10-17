@@ -41,6 +41,11 @@ struct ReminderEngine {
     private(set) var phase: ReminderPhase = .idle
     private(set) var enabled: Bool
     private(set) var trigger: ReminderTrigger
+    /// Nil keeps the original immediate/threshold reminder behavior. A value
+    /// adds a delay after eligibility begins and after the user snoozes a cat.
+    private(set) var interval: TimeInterval?
+    private(set) var nextReminderAt: TimeInterval?
+    private(set) var isSnoozed = false
 
     let staleGrace: TimeInterval
 
@@ -48,15 +53,19 @@ struct ReminderEngine {
     private var lastValidACAt: TimeInterval?
     private var consecutiveDisconnected = 0
     private var consecutiveConnected = 0
+    private var latestSampleEligible = false
+    private var snoozeDismissal = false
     private let requiredConsecutiveReadings = 2
 
     init(
         enabled: Bool = true,
         trigger: ReminderTrigger = .immediate,
-        staleGrace: TimeInterval = 30
+        staleGrace: TimeInterval = 30,
+        interval: TimeInterval? = nil
     ) {
         self.enabled = enabled
         self.trigger = Self.normalized(trigger)
+        self.interval = Self.normalized(interval)
         self.staleGrace = staleGrace.isFinite && staleGrace > 0 ? staleGrace : 30
     }
 
@@ -87,6 +96,7 @@ struct ReminderEngine {
         } else {
             consecutiveDisconnected = 0
             consecutiveConnected = 0
+            clearSchedule()
             return expiration
         }
         lastValidACAt = timestamp
@@ -97,6 +107,9 @@ struct ReminderEngine {
             consecutiveDisconnected = min(consecutiveDisconnected + 1, requiredConsecutiveReadings)
             consecutiveConnected = 0
         }
+        latestSampleEligible = !connected && consecutiveDisconnected >= requiredReadings
+            && shouldStart(batteryPercentage: sample.batteryPercentage)
+        if !latestSampleEligible { clearSchedule() }
 
         // An expired reminder is hidden even if this poll brings telemetry back.
         // A later fresh confirmation may start another reminder.
@@ -104,18 +117,14 @@ struct ReminderEngine {
 
         switch phase {
         case .idle:
-            guard consecutiveDisconnected >= requiredReadings,
-                  shouldStart(batteryPercentage: sample.batteryPercentage) else {
-                return .none
-            }
-            phase = .active
-            return .start
+            return startIfDue(at: timestamp)
         case .active:
             // Once started, changing battery level or trigger settings never
             // stops the reminder. Confirmed AC connection ends it, including at 0 W.
             guard consecutiveConnected >= requiredReadings else {
                 return .none
             }
+            snoozeDismissal = false
             phase = .dismissing
             return .finish
         case .dismissing:
@@ -130,7 +139,27 @@ struct ReminderEngine {
               lastAcceptedAt.map({ timestamp >= $0 }) ?? true else {
             return .none
         }
-        return expireTelemetry(at: timestamp)
+        let expiration = expireTelemetry(at: timestamp)
+        guard expiration == .none else { return expiration }
+        // A tick can honor an existing timer, but cannot infer a new eligible
+        // condition or start an untimed reminder without a fresh poll.
+        guard phase == .idle, interval != nil, nextReminderAt != nil else { return .none }
+        return startIfDue(at: timestamp)
+    }
+
+    /// A timed cat stays until clicked. The next interval starts at that click,
+    /// not when the animation began or when its short pop finishes.
+    mutating func snooze(at timestamp: TimeInterval) -> ReminderCommand {
+        guard enabled, phase == .active, let interval, timestamp.isFinite,
+              lastAcceptedAt.map({ timestamp >= $0 }) ?? true else { return .none }
+        let expiration = expireTelemetry(at: timestamp)
+        guard expiration == .none else { return expiration }
+        lastAcceptedAt = timestamp
+        nextReminderAt = latestSampleEligible ? timestamp + interval : nil
+        isSnoozed = nextReminderAt != nil
+        snoozeDismissal = true
+        phase = .dismissing
+        return .finish
     }
 
     /// Trigger changes take effect on the next reading. Disabling immediately
@@ -138,16 +167,25 @@ struct ReminderEngine {
     mutating func updateSettings(
         enabled: Bool,
         trigger: ReminderTrigger,
+        interval: TimeInterval? = nil,
         at timestamp: TimeInterval
     ) -> ReminderCommand {
         let wasEnabled = self.enabled
+        let normalizedTrigger = Self.normalized(trigger)
+        let normalizedInterval = Self.normalized(interval)
+        let timingChanged = self.trigger != normalizedTrigger || self.interval != normalizedInterval
         self.enabled = enabled
-        self.trigger = Self.normalized(trigger)
+        self.trigger = normalizedTrigger
+        self.interval = normalizedInterval
         if !enabled {
             return cancel()
         }
         if !wasEnabled {
             resetObservations()
+        } else if timingChanged {
+            // Changing a countdown starts a full interval on the next fresh
+            // eligible reading. It never cuts short an already-visible cat.
+            clearSchedule()
         }
         return tick(at: timestamp)
     }
@@ -156,7 +194,11 @@ struct ReminderEngine {
     mutating func dismissalDidFinish() {
         guard phase == .dismissing else { return }
         phase = .idle
-        resetObservations()
+        if snoozeDismissal, nextReminderAt != nil {
+            snoozeDismissal = false
+        } else {
+            resetObservations()
+        }
     }
 
     /// Used for disabling, quitting, source changes, or explicit dismissal.
@@ -182,6 +224,25 @@ struct ReminderEngine {
         }
     }
 
+    private mutating func startIfDue(at timestamp: TimeInterval) -> ReminderCommand {
+        guard latestSampleEligible else { return .none }
+        if let interval {
+            if nextReminderAt == nil { nextReminderAt = timestamp + interval }
+            guard let deadline = nextReminderAt, timestamp >= deadline else { return .none }
+        }
+        nextReminderAt = nil
+        isSnoozed = false
+        snoozeDismissal = false
+        phase = .active
+        return .start
+    }
+
+    private mutating func clearSchedule() {
+        nextReminderAt = nil
+        latestSampleEligible = false
+        isSnoozed = false
+    }
+
     private mutating func expireTelemetry(at timestamp: TimeInterval) -> ReminderCommand {
         guard let lastValidACAt,
               timestamp - lastValidACAt >= staleGrace else {
@@ -194,6 +255,8 @@ struct ReminderEngine {
         self.lastValidACAt = nil
         consecutiveDisconnected = 0
         consecutiveConnected = 0
+        clearSchedule()
+        snoozeDismissal = false
         return wasVisible ? .cancel : .none
     }
 
@@ -202,6 +265,8 @@ struct ReminderEngine {
         lastValidACAt = nil
         consecutiveDisconnected = 0
         consecutiveConnected = 0
+        clearSchedule()
+        snoozeDismissal = false
     }
 
     private static func normalized(_ trigger: ReminderTrigger) -> ReminderTrigger {
@@ -211,5 +276,10 @@ struct ReminderEngine {
         case .belowBattery(let threshold):
             return .belowBattery(threshold.isFinite ? min(100, max(0, threshold)) : 50)
         }
+    }
+
+    private static func normalized(_ interval: TimeInterval?) -> TimeInterval? {
+        guard let interval else { return nil }
+        return interval.isFinite ? min(3600, max(60, interval)) : 300
     }
 }

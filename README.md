@@ -2,7 +2,7 @@
 
 <img src="Resources/NachoPowerLogo.png" width="180" alt="Nacho Power logo">
 
-A Mac app that reminds you to reconnect your EcoFlow to AC power. It shows the station's battery percentage in the Dock and plays a transparent cat above your desktop when AC is disconnected. Clicks and keystrokes continue to reach the apps behind the cat.
+A Mac app that reminds you to reconnect your EcoFlow to AC power. It shows the station's battery percentage in the Dock and plays a transparent cat above your desktop when AC is disconnected. By default, clicks and keystrokes continue to reach the apps behind the cat. Optional timed reminders let you click the cat to snooze it.
 
 The Dock icon and menu-bar battery indicator are **green when AC is connected** and **red when AC is disconnected**. It shows an unknown state when a reliable connection or AC reading is unavailable. A fully charged station can be green even while drawing 0 W.
 
@@ -51,19 +51,33 @@ Open **Connection settings**, choose a transport, enter any required details, an
 
 The app stores the discovered or signed-in Bluetooth account identity and cloud API keys in this Mac's Keychain. The optional sign-in helper sends your password directly to EcoFlow over HTTPS for that request and never saves it. Subsequent Bluetooth connections use the stored account ID. Settings show the battery, input power, AC state, and connection errors.
 
-The default reminder setting is **Immediately**: a fresh, reliable AC-disconnected reading starts the intro once, followed by the loop repeating. **Bottom left** and **Top left** use `intro_left.mov` and `looping_left.mov`, where the cat enters from the left. **Bottom right** and **Top right** keep the original `intro.mov` and `loop.mov`. Reconnecting AC interrupts either video immediately and removes the cat with a short, approximately 0.18-second pop. It does not wait for charging watts or a separate outro movie. Existing saved battery-threshold preferences remain available; a threshold starts the cat only when the battery is strictly below that value.
+The default reminder setting is **When unplugged**: a fresh, reliable AC-disconnected reading starts the intro once, followed by the loop repeating. **Bottom left** and **Top left** use `intro_left.mov` and `looping_left.mov`, where the cat enters from the left. **Bottom right** and **Top right** keep the original `intro.mov` and `loop.mov`. Reconnecting AC interrupts either video immediately and removes the cat with a short, approximately 0.18-second pop. It does not wait for charging watts or a separate outro movie. Existing saved battery-threshold preferences remain available; a threshold starts the cat only when the battery is strictly below that value.
 
 With **Fit animation across the entire screen** enabled, choose **From Right** or **From Left**. This direction is saved independently from the smaller corner overlay’s position. Turning full-screen fitting off restores the corner and size controls.
 
 Full-screen fitting preserves the video's proportions within each display. On a portrait monitor, the video fits the screen width and stays at the bottom, leaving transparent space above instead of enlarging and cropping the cat.
 
-Choose **Main display**, a named monitor, or **All displays**. A named monitor is remembered by its display identity, so rearranging screens does not change the selection. If it is disconnected, the cat temporarily uses the main display and returns when the selected monitor reconnects. In All displays mode, each display gets its own transparent, click-through cat; a newly connected display joins the current intro or loop. AC reconnection pops all cats away together. macOS handles mirrored displays as a single drawable display.
+Choose **Main display**, a named monitor, or **All displays**. A named monitor is remembered by its display identity, so rearranging screens does not change the selection. If it is disconnected, the cat temporarily uses the main display and returns when the selected monitor reconnects. In All displays mode, each display gets its own transparent cat; a newly connected display joins the current intro or loop. AC reconnection pops all cats away together. macOS handles mirrored displays as a single drawable display.
 
 Audio is muted. **Preview cat** plays the intro and two loops across the selected displays, then pops away; **End preview** dismisses them immediately.
 
 Missing data never counts as an unplug event. A complete telemetry interruption starts a 30-second reminder grace period, then the cat hides. Bluetooth updates can contain only changed fields: a known explicit AC state stays valid while the same authenticated session continues delivering live telemetry. Disconnecting or a stalled stream clears that state before reconnecting. Explicit AC presence is authoritative even at 0 W. Starting with v1.3.2, firmware that omits that flag can use fresh AC-input voltage from an authenticated runtime-status request. Voltage-derived status expires after six seconds without a new voltage reading. Zero watts alone never means the AC cable is unplugged.
 
 **A gray icon with a battery percentage means the app has battery data but no reliable AC status.** Check Settings for **AC status unavailable**. Wait briefly for the station's initial status, then use **Save & connect** with the official EcoFlow app closed. If the status stays unknown, report the station model and firmware, the connection source shown in Settings, and the displayed status. The app keeps AC unknown when neither an explicit AC-presence flag nor a fresh, usable AC-input voltage reading is available, even if the battery percentage is available. On newer DELTA 3 Plus firmware, install v1.3.2 or later to enable the voltage fallback.
+
+## Timed reminders
+
+Use the **Show cat** slider in Settings. Its far-left position, **Immediately**, preserves the original continuous reminder. Move right to choose a delay of **1–60 minutes**. The first countdown starts while fresh EcoFlow readings confirm AC is disconnected and your battery condition is met. The cat enters once and keeps looping until you click it, choose **Snooze** in Settings or the menu bar, or reconnect AC. Snoozing pops the cat away on every selected display and starts a new full interval. AC reconnection clears the countdown and immediately pops away any active cat. Unknown or stale readings cannot start a timed reminder. Existing continuous-reminder preferences start at **Immediately**; saved timed intervals are preserved.
+
+Only the small area surrounding the visible cat captures clicks in timed mode; the remaining desktop stays usable and typing remains with your active app. In continuous mode the entire cat remains click-through. **Preview cat** remains a short manual preview, independent of the timer.
+
+## Troubleshooting and diagnostic reports
+
+Starting with **v1.6.0**, Settings includes **Diagnostics & support**. Reproduce the problem, choose **Export report**, save the text file, and **Review report**. **Email report** opens a draft addressed to **nachopower@atomfilmlab.com** with the report attached when your Mac’s email app supports it. Describe the problem, approximate time, and EcoFlow firmware version, then send the draft yourself. If no email app is configured, attach the saved report using webmail.
+
+The app keeps recent diagnostic events locally in `~/Library/Application Support/Nacho Power/Diagnostics`, limited to two 1 MiB files. Reports contain the app/macOS version, display dimensions, reminder settings, battery/AC readings, connection state, timing, and numeric protocol field identifiers. Strict allowlists exclude passwords, access keys, account IDs, serial numbers, email addresses, display names/IDs, raw Bluetooth packets, and arbitrary error text. Logs are never uploaded automatically. Export is an explicit action and you can read the file before sharing it. Older app versions cannot provide this history; install v1.6.0 or later and reproduce the issue first.
+
+Standard macOS editing shortcuts—Command+V, Command+C, Command+X, Command+A, and undo/redo—are available through the Edit menu. Secure fields retain macOS restrictions on copying sensitive text.
 
 ## Device support and verification
 

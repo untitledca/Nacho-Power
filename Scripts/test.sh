@@ -14,6 +14,7 @@ xcrun swiftc -parse-as-library -swift-version 5 "$PROJECT_DIR/Sources/TelemetryM
 xcrun clang -O2 -c "$PROJECT_DIR/Sources/EcoFlowCrypto.c" -o "$PROJECT_DIR/.build/ecoflow-crypto-tests.o"
 xcrun swiftc -parse-as-library -swift-version 5 \
     "$PROJECT_DIR/Sources/TelemetryModels.swift" \
+    "$PROJECT_DIR/Sources/SupportDiagnostics.swift" \
     "$PROJECT_DIR/Sources/DirectEcoFlowMonitor.swift" \
     "$PROJECT_DIR/Sources/EcoFlowWirelessProtocol.swift" \
     "$PROJECT_DIR/Sources/EcoFlowSessionKeyData.swift" \
@@ -27,6 +28,7 @@ xcrun swiftc -parse-as-library -swift-version 5 \
 
 xcrun swiftc -parse-as-library -swift-version 5 \
     "$PROJECT_DIR/Sources/TelemetryModels.swift" \
+    "$PROJECT_DIR/Sources/SupportDiagnostics.swift" \
     "$PROJECT_DIR/Sources/DirectEcoFlowMonitor.swift" \
     "$PROJECT_DIR/Sources/EcoFlowWirelessProtocol.swift" \
     "$PROJECT_DIR/Sources/EcoFlowSessionKeyData.swift" \
@@ -67,6 +69,18 @@ xcrun swiftc -parse-as-library -swift-version 5 \
     -o "$PROJECT_DIR/.build/overlay-layout-checks"
 "$PROJECT_DIR/.build/overlay-layout-checks"
 
+# Pointer/alpha coordinate mapping is pure geometry by default. The optional
+# --video-alpha flag also samples bundled video alpha headlessly, without windows.
+xcrun swiftc -O -parse-as-library -swift-version 5 \
+    "$PROJECT_DIR/Sources/OverlayDisplaySelection.swift" \
+    "$PROJECT_DIR/Sources/CatOverlay.swift" \
+    "$PROJECT_DIR/Tests/OverlayInteractionChecks.swift" \
+    -o "$PROJECT_DIR/.build/overlay-interaction-checks"
+"$PROJECT_DIR/.build/overlay-interaction-checks"
+if [[ " $* " == *" --video-alpha "* ]]; then
+    "$PROJECT_DIR/.build/overlay-interaction-checks" "$PROJECT_DIR/Assets"
+fi
+
 # Session state uses the production parser and routing rules without BLE hardware.
 xcrun swiftc -parse-as-library -swift-version 5 \
     "$PROJECT_DIR/Sources/TelemetryModels.swift" \
@@ -77,3 +91,21 @@ xcrun swiftc -parse-as-library -swift-version 5 \
     "$PROJECT_DIR/.build/ecoflow-crypto-tests.o" \
     -o "$PROJECT_DIR/.build/bluetooth-session-checks"
 "$PROJECT_DIR/.build/bluetooth-session-checks"
+
+# Pure diagnostics tests use isolated temporary storage and synthetic packets.
+xcrun swiftc -parse-as-library -swift-version 5 \
+    "$PROJECT_DIR/Sources/SupportDiagnostics.swift" \
+    "$PROJECT_DIR/Tests/SupportDiagnosticsChecks.swift" \
+    -o "$PROJECT_DIR/.build/support-diagnostics-checks"
+"$PROJECT_DIR/.build/support-diagnostics-checks"
+
+xcrun swiftc -parse-as-library -swift-version 5 \
+    "$PROJECT_DIR/Sources/TelemetryModels.swift" \
+    "$PROJECT_DIR/Sources/SupportDiagnostics.swift" \
+    "$PROJECT_DIR/Sources/EcoFlowWirelessProtocol.swift" \
+    "$PROJECT_DIR/Sources/EcoFlowSessionKeyData.swift" \
+    "$PROJECT_DIR/Sources/EcoFlowBluetoothSessionState.swift" \
+    "$PROJECT_DIR/Tests/BluetoothDiagnosticChecks.swift" \
+    "$PROJECT_DIR/.build/ecoflow-crypto-tests.o" \
+    -o "$PROJECT_DIR/.build/bluetooth-diagnostic-checks"
+"$PROJECT_DIR/.build/bluetooth-diagnostic-checks"

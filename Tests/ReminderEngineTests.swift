@@ -36,6 +36,13 @@ private enum ReminderEngineTests {
             ("explicit cancellation and safe reset", testCancellation),
             ("explicit AC state starts and stops even with zero or missing watts", testConnectedZeroInput),
             ("immediate default and authoritative AC status", testExplicitACState),
+            ("timed reminders start only after a full eligible interval", testTimedStart),
+            ("click snooze counts from the click through pop completion", testTimedSnooze),
+            ("unknown and stale telemetry reset timed reminders", testTimedTelemetry),
+            ("timed threshold eligibility must remain valid", testTimedThreshold),
+            ("AC restoration cancels waiting and snoozed reminders", testTimedReconnect),
+            ("timed settings, disable, and source resets", testTimedSettings),
+            ("timer normalization and invalid snooze timestamps", testTimedValidation),
         ]
         var failures = 0
         for (name, test) in tests {
@@ -215,5 +222,155 @@ private enum ReminderEngineTests {
         try expect(threshold.ingest(reading(nil, 80, acConnected: false), at: 0), .none, "saved optional threshold is respected")
         try expect(threshold.ingest(reading(nil, 49, acConnected: false), at: 2), .start, "explicit disconnect starts below threshold")
         try expect(threshold.ingest(reading(nil, 100, acConnected: true), at: 4), .finish, "threshold never blocks reconnection dismissal")
+    }
+
+    private static func testTimedStart() throws {
+        var engine = ReminderEngine(interval: 60)
+        try expect(engine.ingest(reading(0), at: 0), .none, "a noisy unconfirmed AC sample cannot start a timer")
+        try expect(engine.nextReminderAt, nil, "no timer before confirmation")
+        try expect(engine.ingest(reading(0), at: 2), .none, "confirmed outage schedules instead of showing cat")
+        try expect(engine.nextReminderAt, 62, "full interval begins at confirmed eligibility")
+        for timestamp in stride(from: 10.0, through: 60.0, by: 10) {
+            try expect(engine.ingest(reading(0), at: timestamp), .none, "fresh polls preserve original deadline")
+        }
+        try expect(engine.nextReminderAt, 62, "polling does not perpetually postpone the cat")
+        try expect(engine.tick(at: 61.9), .none, "tick must not start early")
+        try expect(engine.tick(at: 62), .start, "fresh eligibility lets a timer fire between polls")
+        try expect(engine.nextReminderAt, nil, "active cat has no recurring restart deadline")
+        for timestamp in stride(from: 80.0, through: 200.0, by: 20) {
+            try expect(engine.ingest(reading(0), at: timestamp), .none, "visible cat loops until clicked or AC returns")
+        }
+        try expect(engine.phase, .active, "timer is not an automatic timeout")
+    }
+
+    private static func testTimedSnooze() throws {
+        var engine = ReminderEngine(interval: 60)
+        _ = engine.ingest(reading(nil, acConnected: false), at: 0)
+        for timestamp in [20.0, 40, 60] { _ = engine.ingest(reading(nil, acConnected: false), at: timestamp) }
+        try expect(engine.phase, .active, "timed cat is active before click")
+        try expect(engine.snooze(at: 70), .finish, "click starts the pop")
+        try expect(engine.phase, .dismissing, "click pop has its own dismissal phase")
+        try expect(engine.nextReminderAt, 130, "deadline is click plus interval")
+        try expect(engine.isSnoozed, true, "UI can distinguish snooze from first waiting interval")
+        try expect(engine.snooze(at: 70.1), .none, "a second click cannot extend the timer")
+        engine.dismissalDidFinish()
+        try expect(engine.nextReminderAt, 130, "pop completion preserves click deadline")
+        try expect(engine.phase, .idle, "snoozed cat is hidden")
+        try expect(engine.ingest(reading(nil, acConnected: true), at: 69), .none, "old delivery before click cannot cancel its schedule")
+        for timestamp in [80.0, 100, 120] {
+            try expect(engine.ingest(reading(nil, acConnected: false), at: timestamp), .none, "snooze keeps checking eligibility")
+        }
+        try expect(engine.tick(at: 129.9), .none, "full snooze interval is respected")
+        try expect(engine.tick(at: 130), .start, "new intro begins when snooze expires")
+        try expect(engine.isSnoozed, false, "snooze clears on next cat")
+    }
+
+    private static func testTimedTelemetry() throws {
+        var engine = ReminderEngine(interval: 60)
+        _ = engine.ingest(reading(nil, acConnected: false), at: 0)
+        _ = engine.ingest(reading(nil, acConnected: false), at: 20)
+        try expect(engine.ingest(reading(nil), at: 25), .none, "unknown state cancels a pending timer")
+        try expect(engine.nextReminderAt, nil, "unknown AC cannot leave an armed deadline")
+        try expect(engine.tick(at: 60), .none, "unknown telemetry cannot show a cat")
+        _ = engine.ingest(reading(nil, acConnected: false), at: 61)
+        try expect(engine.nextReminderAt, 121, "recovery starts a fresh full interval")
+        try expect(engine.tick(at: 91), .none, "stale invisible schedule expires quietly")
+        try expect(engine.nextReminderAt, nil, "stalled polling clears the deadline")
+        _ = engine.ingest(reading(nil, acConnected: false), at: 100)
+        for timestamp in [120.0, 140, 160] { _ = engine.ingest(reading(nil, acConnected: false), at: timestamp) }
+        try expect(engine.phase, .active, "fresh interval can start after recovery")
+        try expect(engine.tick(at: 190), .cancel, "an active timed cat retains stale-data protection")
+        try expect(engine.nextReminderAt, nil, "expiry clears any timing state")
+        try expect(engine.isSnoozed, false, "expiry is not a user snooze")
+    }
+
+    private static func testTimedThreshold() throws {
+        var engine = ReminderEngine(trigger: .belowBattery(50), interval: 60)
+        _ = engine.ingest(reading(nil, 50, acConnected: false), at: 0)
+        try expect(engine.nextReminderAt, nil, "equal threshold is ineligible")
+        _ = engine.ingest(reading(nil, 49, acConnected: false), at: 10)
+        try expect(engine.nextReminderAt, 70, "below threshold begins countdown")
+        _ = engine.ingest(reading(nil, nil, acConnected: false), at: 20)
+        try expect(engine.nextReminderAt, nil, "missing battery cancels a threshold countdown")
+        _ = engine.ingest(reading(nil, 49, acConnected: false), at: 30)
+        _ = engine.ingest(reading(nil, 80, acConnected: false), at: 40)
+        try expect(engine.nextReminderAt, nil, "battery becoming ineligible resets countdown")
+        for timestamp in [50.0, 70, 90, 110] { _ = engine.ingest(reading(nil, 49, acConnected: false), at: timestamp) }
+        try expect(engine.phase, .active, "continuously eligible interval starts cat")
+        try expect(engine.ingest(reading(nil, 80, acConnected: false), at: 112), .none, "active latch survives battery change")
+        try expect(engine.snooze(at: 113), .finish, "click still dismisses a latched cat")
+        try expect(engine.nextReminderAt, nil, "ineligible battery cannot arm another cat")
+        engine.dismissalDidFinish()
+        _ = engine.ingest(reading(nil, 49, acConnected: false), at: 120)
+        try expect(engine.nextReminderAt, 180, "new eligibility needs its full interval")
+    }
+
+    private static func testTimedReconnect() throws {
+        var engine = ReminderEngine(interval: 60)
+        _ = engine.ingest(reading(nil, acConnected: false), at: 0)
+        _ = engine.ingest(reading(0, acConnected: true), at: 20)
+        try expect(engine.nextReminderAt, nil, "connected at zero watts clears waiting timer")
+        _ = engine.ingest(reading(nil, acConnected: false), at: 30)
+        try expect(engine.nextReminderAt, 90, "new outage restarts countdown")
+        for timestamp in [50.0, 70, 90] { _ = engine.ingest(reading(nil, acConnected: false), at: timestamp) }
+        try expect(engine.snooze(at: 91), .finish, "snooze begins")
+        try expect(engine.ingest(reading(nil, acConnected: true), at: 91.1), .none, "AC during pop must not duplicate the pop")
+        try expect(engine.nextReminderAt, nil, "AC during pop clears the snoozed deadline")
+        engine.dismissalDidFinish()
+        try expect(engine.isSnoozed, false, "AC restoration clears snooze state")
+        _ = engine.ingest(reading(nil, acConnected: false), at: 100)
+        try expect(engine.nextReminderAt, 160, "outage after reconnection waits again")
+        for timestamp in [120.0, 140, 160] { _ = engine.ingest(reading(nil, acConnected: false), at: timestamp) }
+        try expect(engine.ingest(reading(nil, acConnected: true), at: 162), .finish, "AC reconnect immediately pops an active timed cat")
+        try expect(engine.nextReminderAt, nil, "AC dismissal never arms a new timer")
+    }
+
+    private static func testTimedSettings() throws {
+        var engine = ReminderEngine(interval: 60)
+        _ = engine.ingest(reading(nil, acConnected: false), at: 0)
+        _ = engine.updateSettings(enabled: true, trigger: .immediate, interval: 60, at: 10)
+        try expect(engine.nextReminderAt, 60, "unchanged settings do not restart countdown")
+        _ = engine.updateSettings(enabled: true, trigger: .immediate, interval: 120, at: 11)
+        try expect(engine.nextReminderAt, nil, "new interval waits for fresh eligibility")
+        _ = engine.ingest(reading(nil, acConnected: false), at: 12)
+        try expect(engine.nextReminderAt, 132, "changed interval applies in full")
+        _ = engine.updateSettings(enabled: false, trigger: .immediate, interval: 120, at: 13)
+        try expect(engine.nextReminderAt, nil, "pause clears countdown")
+        _ = engine.updateSettings(enabled: true, trigger: .immediate, interval: 60, at: 14)
+        _ = engine.ingest(reading(nil, acConnected: false), at: 15)
+        try expect(engine.nextReminderAt, 75, "resuming does not reuse elapsed time")
+        try expect(engine.cancel(), .none, "source change cancels an invisible countdown")
+        try expect(engine.nextReminderAt, nil, "source change clears countdown")
+        _ = engine.ingest(reading(nil, acConnected: false), at: 20)
+        for timestamp in [40.0, 60, 80] { _ = engine.ingest(reading(nil, acConnected: false), at: timestamp) }
+        try expect(engine.updateSettings(enabled: true, trigger: .belowBattery(10), interval: 120, at: 81), .none, "timing changes preserve active latch")
+        try expect(engine.phase, .active, "existing cat still waits for click or AC")
+        try expect(engine.updateSettings(enabled: false, trigger: .immediate, interval: 60, at: 82), .cancel, "disabling still hides active cat immediately")
+
+        var switchesToImmediate = ReminderEngine(interval: 60)
+        _ = switchesToImmediate.ingest(reading(nil, acConnected: false), at: 0)
+        _ = switchesToImmediate.updateSettings(enabled: true, trigger: .immediate, interval: nil, at: 1)
+        try expect(switchesToImmediate.nextReminderAt, nil, "disabling timer clears waiting deadline")
+        try expect(switchesToImmediate.ingest(reading(nil, acConnected: false), at: 2), .start, "untimed mode starts on next fresh reading")
+    }
+
+    private static func testTimedValidation() throws {
+        try expect(ReminderEngine(interval: -1).interval, 60, "interval clamps to one minute")
+        try expect(ReminderEngine(interval: 9_000).interval, 3_600, "interval clamps to one hour")
+        try expect(ReminderEngine(interval: .nan).interval, 300, "invalid interval uses five-minute default")
+        try expect(ReminderEngine(interval: .infinity).interval, 300, "infinite interval is normalized")
+        try expect(ReminderEngine().interval, nil, "legacy mode is unchanged by default")
+        var untimed = ReminderEngine()
+        _ = untimed.ingest(reading(nil, acConnected: false), at: 0)
+        try expect(untimed.snooze(at: 1), .none, "untimed reminders do not acquire an implicit snooze period")
+
+        var timed = ReminderEngine(interval: 60)
+        _ = timed.ingest(reading(nil, acConnected: false), at: 0)
+        for timestamp in [20.0, 40, 60] { _ = timed.ingest(reading(nil, acConnected: false), at: timestamp) }
+        try expect(timed.snooze(at: .nan), .none, "invalid click time cannot hide cat")
+        try expect(timed.snooze(at: 59), .none, "out-of-order click time cannot hide cat")
+        try expect(timed.phase, .active, "rejected click leaves cat active")
+        try expect(timed.snooze(at: 90), .cancel, "click cannot convert expired telemetry into a new timer")
+        try expect(timed.nextReminderAt, nil, "stale click leaves no schedule")
     }
 }

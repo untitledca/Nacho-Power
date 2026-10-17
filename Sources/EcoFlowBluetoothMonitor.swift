@@ -4,7 +4,7 @@ import AppKit
 
 @MainActor
 final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerDelegate, @preconcurrency CBPeripheralDelegate {
-    private enum Phase { case idle, scanning, connecting, services, notifying, publicKey, sessionKey, authStatus, authenticating, ready }
+    private enum Phase: String { case idle, scanning, connecting, services, notifying, publicKey, sessionKey, authStatus, authenticating, ready }
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
     private var writeCharacteristic: CBCharacteristic?
@@ -24,6 +24,11 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
     private var generation = 0
     private var runtimePollTask: Task<Void, Never>?
     private var scanCandidates: [UUID: (CBPeripheral, EcoFlowWirelessProtocol.Advertisement)] = [:]
+    private var diagnosticThrottle = SupportDiagnosticThrottle()
+    private var diagnosticStatus = ""
+    private var writeStartedAt: Date?
+    private var diagnosticWriteCount = 0
+    private var diagnosticFrameCount = 0
 
     static let service = CBUUID(string: "00000001-0000-1000-8000-00805f9b34fb")
     // Firmware uses either the 0001/0002/0003 or 0005/0006/0007 GATT family.
@@ -46,10 +51,10 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
         if central.state == .poweredOff { throw EcoFlowWirelessError.message("Turn on Bluetooth to connect to the EcoFlow.") }
         if central.state == .unsupported { throw EcoFlowWirelessError.message("Bluetooth Low Energy is unavailable on this Mac.") }
         if phase == .ready && readings.streamIsStale(at: Date()) {
-            fail(EcoFlowWirelessError.message("EcoFlow Bluetooth readings stopped. Reconnecting…"))
+            fail(EcoFlowWirelessError.message("EcoFlow Bluetooth readings stopped. Reconnecting…"), reason: "stream_stale")
         }
         if phase != .idle && phase != .ready && Date().timeIntervalSince(phaseStarted) > 20 {
-            fail(EcoFlowWirelessError.message("Bluetooth connection timed out. Close the EcoFlow app and keep the DELTA nearby."))
+            fail(EcoFlowWirelessError.message("Bluetooth connection timed out. Close the EcoFlow app and keep the DELTA nearby."), reason: "timeout")
         }
         if phase == .idle, Date() >= retryAfter, central.state == .poweredOn { scan() }
         let currentGeneration = generation
@@ -58,7 +63,10 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
             try Task.checkCancellation()
             guard currentGeneration == generation else { throw failure ?? EcoFlowWirelessError.message("Bluetooth reconnecting…") }
             if phase == .ready, let advertisement,
-               let latest = readings.snapshot(deviceName: advertisement.deviceName, at: Date()) { return latest }
+               let latest = readings.snapshot(deviceName: advertisement.deviceName, at: Date()) {
+                recordSessionStatus()
+                return latest
+            }
             if let failure, phase == .idle { throw failure }
             try await Task.sleep(nanoseconds: 200_000_000)
         }
@@ -74,6 +82,7 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
     }
 
     func stop() {
+        if phase != .idle { recordDiagnostic("stop", details: ["reason": "cancelled"], interval: 0) }
         generation += 1
         runtimePollTask?.cancel(); runtimePollTask = nil
         central?.stopScan()
@@ -82,11 +91,62 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
         keyExchange = nil; sessionKey = []; iv = []; frames = .init(); readings.reset()
         pendingWrites = []; writeInProgress = false
         scanCandidates = [:]; phase = .idle; failure = nil
+        diagnosticThrottle.reset(); diagnosticStatus = ""
+        writeStartedAt = nil; diagnosticWriteCount = 0; diagnosticFrameCount = 0
     }
 
-    private func setPhase(_ value: Phase) { phase = value; phaseStarted = Date() }
-    private func fail(_ error: Error, delay: TimeInterval = 5) {
+    private func setPhase(_ value: Phase) {
+        let changed = phase != value
+        phase = value; phaseStarted = Date()
+        if changed { recordDiagnostic("phase_changed", interval: 0) }
+    }
+    private func fail(_ error: Error, delay: TimeInterval = 5, reason: String? = nil) {
+        var details = SupportDiagnostics.errorDetails(error)
+        details["reason"] = reason ?? Self.diagnosticErrorReason(error)
+        recordDiagnostic("failure", details: details, interval: 0)
         stop(); failure = error; retryAfter = Date().addingTimeInterval(delay)
+    }
+
+    private static func diagnosticErrorReason(_ error: Error) -> String {
+        guard let wireless = error as? EcoFlowWirelessError else { return "other" }
+        switch wireless {
+        case .authentication: return "authentication"
+        case .invalidPacket: return "invalid_packet"
+        case .unsupportedDevice: return "unsupported"
+        case .message: return "other"
+        }
+    }
+
+    private func recordDiagnostic(_ event: String, details extra: [String: Any] = [:],
+                                  interval: TimeInterval = 30, key: String? = nil) {
+        let now = Date()
+        guard diagnosticThrottle.shouldRecord(key ?? event, at: now, interval: interval) else { return }
+        var details = readings.diagnosticDetails(at: now)
+        details["transport"] = "bluetooth"
+        details["phase"] = phase.rawValue
+        details["queueDepth"] = pendingWrites.count
+        details["writeInProgress"] = writeInProgress
+        details["writeCount"] = diagnosticWriteCount
+        details["frameCount"] = diagnosticFrameCount
+        if let writeStartedAt { details["writeAge"] = max(0, now.timeIntervalSince(writeStartedAt)) }
+        if let advertisement, advertisement.supported {
+            details["deviceModel"] = advertisement.deviceName == "EcoFlow DELTA 3 Plus" ? "DELTA 3 Plus" : "DELTA 3"
+        }
+        details.merge(extra) { _, new in new }
+        SupportDiagnostics.shared.record(category: "bluetooth", event: event, details: details)
+    }
+
+    private func recordSessionStatus() {
+        let details = readings.diagnosticDetails(at: Date())
+        let status = details["acStatus"] as? String ?? "unknown"
+        let reason = details["reason"] as? String ?? "unknown"
+        let signature = status + ":" + reason
+        let changed = signature != diagnosticStatus
+        let previous = diagnosticStatus
+        diagnosticStatus = signature
+        let event = changed && status == "unknown" ? "ac_unknown"
+            : (changed && previous.hasPrefix("unknown:") ? "ac_recovered" : "snapshot")
+        recordDiagnostic(event, details: details, interval: changed ? 0 : 30, key: "session_status")
     }
 
     private func scan() {
@@ -104,11 +164,11 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
         guard !scanCandidates.isEmpty else { return }
         central.stopScan()
         guard scanCandidates.count == 1, let candidate = scanCandidates.values.first else {
-            fail(EcoFlowWirelessError.message("Multiple EcoFlow stations found. Enter the DELTA serial number in Connection settings."), delay: 30); return
+            fail(EcoFlowWirelessError.message("Multiple EcoFlow stations found. Enter the DELTA serial number in Connection settings."), delay: 30, reason: "multiple_devices"); return
         }
         guard candidate.1.supported else { fail(EcoFlowWirelessError.unsupportedDevice, delay: 60); return }
         guard candidate.1.encryption == 7 else {
-            fail(EcoFlowWirelessError.message("This DELTA uses an unsupported Bluetooth security version. Use USB or Wi-Fi cloud."), delay: 60); return
+            fail(EcoFlowWirelessError.message("This DELTA uses an unsupported Bluetooth security version. Use USB or Wi-Fi cloud."), delay: 60, reason: "unsupported"); return
         }
         advertisement = candidate.1; peripheral = candidate.0
         peripheral?.delegate = self; setPhase(.connecting)
@@ -136,11 +196,11 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
     }
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         guard self.peripheral === peripheral else { return }
-        fail(EcoFlowWirelessError.message("Could not connect to the EcoFlow. Close its official app and retry."))
+        fail(EcoFlowWirelessError.message("Could not connect to the EcoFlow. Close its official app and retry."), reason: "not_connected")
     }
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         guard self.peripheral === peripheral else { return }
-        fail(EcoFlowWirelessError.message("EcoFlow Bluetooth disconnected. Reconnecting…"))
+        fail(EcoFlowWirelessError.message("EcoFlow Bluetooth disconnected. Reconnecting…"), reason: "disconnected")
     }
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         guard self.peripheral === peripheral else { return }
@@ -179,12 +239,18 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
     private func sendNext() {
         guard !writeInProgress, !pendingWrites.isEmpty, let peripheral, let writeCharacteristic else { return }
         writeInProgress = true
+        writeStartedAt = Date()
+        diagnosticWriteCount += 1
+        recordDiagnostic("write_started")
         peripheral.writeValue(pendingWrites.removeFirst(), for: writeCharacteristic, type: .withResponse)
     }
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
         guard self.peripheral === peripheral else { return }
-        guard error == nil else { fail(EcoFlowWirelessError.message("EcoFlow Bluetooth request failed. Reconnecting…")); return }
-        writeInProgress = false; sendNext()
+        guard error == nil else { fail(EcoFlowWirelessError.message("EcoFlow Bluetooth request failed. Reconnecting…"), reason: "write_failed"); return }
+        writeInProgress = false
+        recordDiagnostic("write_acknowledged")
+        writeStartedAt = nil
+        sendNext()
     }
     private func sendAuth(command: UInt8, payload: [UInt8] = []) throws {
         let packet = EcoFlowWirelessProtocol.authPacket(command: command, payload: payload)
@@ -199,10 +265,19 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
         }
         // A stalled characteristic must not accumulate status requests while
         // the previous encrypted write is still being acknowledged.
-        guard !writeInProgress, pendingWrites.isEmpty else { return }
-        guard readings.takeRuntimeRequest(at: now) else { return }
+        guard !writeInProgress, pendingWrites.isEmpty else {
+            let reason = writeInProgress ? "write_pending" : "queue_pending"
+            recordDiagnostic("poll_skipped", details: ["reason": reason], interval: 15, key: "poll_skipped:" + reason)
+            return
+        }
+        guard readings.takeRuntimeRequest(at: now) else {
+            let reason = readings.needsRuntimePolling ? "poll_interval" : "polling_not_needed"
+            recordDiagnostic("poll_skipped", details: ["reason": reason], key: "poll_skipped:" + reason)
+            return
+        }
         let packet = EcoFlowWirelessProtocol.runtimeUploadRequest()
         let encrypted = try EcoFlowWirelessProtocol.crypt(packet, key: sessionKey, iv: iv, encrypt: true)
+        recordDiagnostic("poll_requested", details: ["commandSet": 254, "commandID": 17])
         send(EcoFlowWirelessProtocol.wrap(encrypted, encrypted: true))
     }
 
@@ -228,7 +303,7 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
     }
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
         guard self.peripheral === peripheral, let data = characteristic.value else { return }
-        guard error == nil else { fail(EcoFlowWirelessError.message("EcoFlow Bluetooth read failed.")); return }
+        guard error == nil else { fail(EcoFlowWirelessError.message("EcoFlow Bluetooth read failed."), reason: "read_failed"); return }
         do {
             for frame in try frames.append(data) {
                 if frame.command && [.authStatus, .authenticating, .ready].contains(phase) { continue }
@@ -261,7 +336,15 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
             case .authenticating: stage = .awaitingOwnerAcknowledgment
             default: stage = .authenticated
             }
-            switch try readings.receive(packet, stage: stage, at: Date()) {
+            let action = try readings.receive(packet, stage: stage, at: Date())
+            diagnosticFrameCount += 1
+            if packet.source == 2, packet.commandSet == 0xfe {
+                let details = EcoFlowBluetoothSessionState.diagnosticPacketDetails(packet)
+                let fields = details["fieldIDs"] as? [Int] ?? []
+                let key = "telemetry:\(packet.command):" + fields.map(String.init).joined(separator: ",")
+                recordDiagnostic("telemetry_received", details: details, key: key)
+            }
+            switch action {
             case .requestOwnerAuthentication:
                 guard let advertisement else { return }
                 let digest = EcoFlowWirelessProtocol.md5(Array((configuration.userID + advertisement.serial).utf8))
@@ -269,6 +352,7 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
                 setPhase(.authenticating); try sendAuth(command: 0x86, payload: Array(auth.utf8))
             case .ownerAccepted:
                 setPhase(.ready)
+                recordDiagnostic("authenticated", interval: 0)
                 try startRuntimePolling()
             case .telemetryReceived, .ignored:
                 // Early uploads remain private until the owner reply succeeds.

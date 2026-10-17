@@ -58,6 +58,8 @@ final class EcoFlowConnectionMonitor {
     private let usb = DirectEcoFlowMonitor()
     private let bluetooth = EcoFlowBluetoothMonitor()
     private let cloud = EcoFlowCloudMonitor()
+    private var diagnosticThrottle = SupportDiagnosticThrottle()
+    private var diagnosticOutcomes: [EcoFlowTransport: String] = [:]
 
     static var officialAppIsRunning: Bool {
         NSWorkspace.shared.runningApplications.contains {
@@ -70,28 +72,96 @@ final class EcoFlowConnectionMonitor {
     func snapshot(configuration: EcoFlowConnectionConfiguration) async throws -> PowerTelemetry {
         guard !Self.officialAppIsRunning else {
             bluetooth.stop()
+            if diagnosticThrottle.shouldRecord("official_app_running", at: Date()) {
+                SupportDiagnostics.shared.record(category: "connection", event: "failure",
+                    details: ["transport": configuration.transport.rawValue, "reason": "unavailable"])
+            }
             throw EcoFlowWirelessError.message("Quit the EcoFlow app / PowerManager so Nacho Power can connect to the DELTA.")
         }
         switch configuration.transport {
         case .usb:
-            bluetooth.stop(); return try await usb.snapshot()
-        case .bluetooth: return try await bluetooth.snapshot(configuration: configuration)
+            bluetooth.stop(); return try await observedSnapshot(.usb) { try await usb.snapshot() }
+        case .bluetooth:
+            return try await observedSnapshot(.bluetooth) { try await bluetooth.snapshot(configuration: configuration) }
         case .wifi:
-            bluetooth.stop(); return try await cloud.snapshot(configuration: configuration)
+            bluetooth.stop(); return try await observedSnapshot(.wifi) { try await cloud.snapshot(configuration: configuration) }
         case .automatic:
             do {
-                let value = try await usb.snapshot(); bluetooth.stop(); return value
+                let value = try await observedSnapshot(.usb) { try await usb.snapshot() }
+                bluetooth.stop(); return value
             } catch {
                 if !configuration.userID.isEmpty {
-                    do { return try await bluetooth.snapshot(configuration: configuration) }
+                    do { return try await observedSnapshot(.bluetooth) { try await bluetooth.snapshot(configuration: configuration) } }
                     catch { if !configuration.cloudConfigured { throw error } }
                 }
-                if configuration.cloudConfigured { return try await cloud.snapshot(configuration: configuration) }
+                if configuration.cloudConfigured {
+                    return try await observedSnapshot(.wifi) { try await cloud.snapshot(configuration: configuration) }
+                }
                 throw EcoFlowWirelessError.message("Connect the DELTA by USB, or sign in under Connection settings for Bluetooth.")
             }
         }
     }
     func stop() { bluetooth.stop() }
+
+    /// Observe existing attempts without changing their order, result, cadence,
+    /// or error. Stable outcomes produce one compact record per 30 seconds.
+    private func observedSnapshot(_ transport: EcoFlowTransport,
+                                  operation: () async throws -> PowerTelemetry) async throws -> PowerTelemetry {
+        do {
+            let value = try await operation()
+            let ac = value.acConnected.map { $0 ? "connected" : "disconnected" } ?? "unknown"
+            let outcome = "success:" + ac
+            let changed = diagnosticOutcomes[transport] != outcome
+            diagnosticOutcomes[transport] = outcome
+            if diagnosticThrottle.shouldRecord(transport.rawValue, at: Date(), interval: changed ? 0 : 30) {
+                var details: [String: Any] = ["transport": transport.rawValue, "acStatus": ac,
+                    "hasBattery": value.batteryPercentage != nil, "hasACStatus": value.acConnected != nil,
+                    "hasACWatts": value.acInputWatts != nil, "hasTotalWatts": value.totalInputWatts != nil,
+                    "observationAge": max(0, Date().timeIntervalSince(value.timestamp))]
+                if let battery = value.batteryPercentage { details["batteryPercentage"] = battery }
+                if let watts = value.acInputWatts { details["acInputWatts"] = watts }
+                if let watts = value.totalInputWatts { details["totalInputWatts"] = watts }
+                if let connected = value.acConnected { details["acConnected"] = connected }
+                SupportDiagnostics.shared.record(category: transport.rawValue, event: "snapshot", details: details)
+            }
+            return value
+        } catch {
+            let reason = Self.diagnosticErrorReason(error)
+            let outcome = "failure:" + reason
+            let changed = diagnosticOutcomes[transport] != outcome
+            diagnosticOutcomes[transport] = outcome
+            if diagnosticThrottle.shouldRecord(transport.rawValue, at: Date(), interval: changed ? 0 : 30) {
+                var details = SupportDiagnostics.errorDetails(error)
+                details["transport"] = transport.rawValue
+                details["reason"] = reason
+                SupportDiagnostics.shared.record(category: transport.rawValue, event: "failure", details: details)
+            }
+            throw error
+        }
+    }
+
+    private static func diagnosticErrorReason(_ error: Error) -> String {
+        if let usb = error as? DirectEcoFlowError {
+            switch usb {
+            case .noDevice: return "no_devices"
+            case .multipleDevices: return "multiple_devices"
+            case .unsupportedDevice: return "unsupported"
+            case .invalidReport: return "invalid_response"
+            case .serialTimeout: return "timeout"
+            case .powerManagerRunning, .serialBusy, .unavailable: return "unavailable"
+            }
+        }
+        if let wireless = error as? EcoFlowWirelessError {
+            switch wireless {
+            case .authentication: return "authentication"
+            case .invalidPacket: return "invalid_packet"
+            case .unsupportedDevice: return "unsupported"
+            case .message: return "other"
+            }
+        }
+        if (error as NSError).domain == NSURLErrorDomain { return "network" }
+        return "other"
+    }
 }
 
 /// GET-only EcoFlow Developer API transport. Wi-Fi on these models reaches the

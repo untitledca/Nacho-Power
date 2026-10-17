@@ -14,10 +14,6 @@ if [[ " $architectures " != *" arm64 "* || " $architectures " != *" x86_64 "* ]]
     print -u2 "The disk image requires a universal app containing arm64 and x86_64."
     exit 1
 fi
-# Finder can attach custom-icon metadata after the build is moved into dist.
-xattr -dr com.apple.FinderInfo "$APP_DIR" 2>/dev/null || true
-xattr -dr com.apple.ResourceFork "$APP_DIR" 2>/dev/null || true
-codesign --verify --deep --strict "$APP_DIR"
 if [[ ! -f "$APP_DIR/Contents/Resources/ThirdPartyNotices.txt" ]]; then
     print -u2 "The app is missing its required ThirdPartyNotices.txt. Rebuild before sharing."
     exit 1
@@ -33,7 +29,8 @@ DMG_BUILD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/ecoflow-dmg.XXXXXX")
 trap 'rm -rf "$DMG_BUILD_DIR"' EXIT
 DMG_STAGE="$DMG_BUILD_DIR/Nacho Power"
 mkdir -p "$DMG_STAGE"
-# Preserve the complete signed bundle and symbolic links.
+# Preserve the signed bundle and symbolic links. Validate the clean staging
+# copy: file providers can immediately reattach Finder metadata in dist.
 ditto --noextattr --norsrc "$APP_DIR" "$DMG_STAGE/Nacho Power.app"
 codesign --verify --deep --strict "$DMG_STAGE/Nacho Power.app"
 ln -s /Applications "$DMG_STAGE/Applications"
@@ -68,10 +65,16 @@ Full-screen fitting has its own From Right / From Left direction control.
 Choose Main display, a named monitor, or All displays in Settings.
 Reconnecting AC immediately starts a short pop dismissal, even at 0 W.
 Open Settings to choose an immediate reminder or a battery threshold.
+The Show cat slider offers Immediately or a 1–60 minute delay while AC is disconnected and the
+battery condition is met. Click the cat or choose Snooze to wait another full
+interval. Reconnecting AC hides the cat and clears the timer.
 
 No Terminal, compiler, or developer tools are needed to run Nacho Power.
 
 Updates and support
+For troubleshooting, export and review a local diagnostic report in Settings.
+Email report opens a draft to nachopower@atomfilmlab.com with the saved report.
+Describe the issue and send it yourself; reports are never uploaded automatically.
 Choose Check for Updates in Settings or the menu bar to install an update.
 In App updates, enable Check automatically for updates for daily checks.
 Also enable Download and install updates automatically for hands-free updates.

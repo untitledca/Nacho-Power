@@ -2,7 +2,7 @@ import AppKit
 import AVFoundation
 import QuartzCore
 
-/// The cat never takes keyboard focus or intercepts clicks, including inside its image.
+/// The cat never takes keyboard focus. Video windows always stay click-through.
 enum OverlayCorner: String, CaseIterable {
     case bottomLeft, bottomRight, topLeft, topRight
 
@@ -39,6 +39,7 @@ final class CatOverlayController {
     var onPlaybackError: ((String) -> Void)?
     var onVisibilityChanged: ((Bool) -> Void)?
     var onDismissalFinished: (() -> Void)?
+    var onSnoozeRequested: (() -> Void)?
 
     private let assetDirectory: URL
     private let displays: @MainActor () -> [OverlayDisplay]
@@ -48,6 +49,8 @@ final class CatOverlayController {
     private var width: CGFloat = 320
     private var corner: OverlayCorner = .bottomRight
     private var fullScreen = true
+    private var clickToSnooze = false
+    private var snoozeRequested = false
     private var fullScreenSide: OverlayVideoSide = .right
     private var displaySelection = OverlayDisplaySelection.main
     private var wantsPlayback = false
@@ -83,10 +86,12 @@ final class CatOverlayController {
     /// screenIndex remains for older callers; saved settings now use stable IDs.
     func updateAppearance(width: CGFloat, corner: OverlayCorner, screenIndex: Int = 0,
                           fullScreen: Bool = true, fullScreenSide: OverlayVideoSide? = nil,
-                          displaySelection: String = OverlayDisplaySelection.main) {
+                          displaySelection: String = OverlayDisplaySelection.main,
+                          clickToSnooze: Bool = false) {
         self.width = width
         self.corner = corner
         self.fullScreen = fullScreen
+        self.clickToSnooze = clickToSnooze
         self.fullScreenSide = fullScreenSide ?? corner.videoSide
         let connected = displays()
         self.displaySelection = displaySelection == OverlayDisplaySelection.main && screenIndex > 0 && connected.indices.contains(screenIndex)
@@ -155,6 +160,7 @@ final class CatOverlayController {
         guard wantsPlayback, !dismissing else { return }
         dismissing = true
         previewRequested = false
+        updateClickInteraction()
         // All surfaces pause and start the same pop in this main-actor turn.
         for surface in Array(surfaces.values) { surface.finishReminder() }
         finishDismissalIfReady()
@@ -164,6 +170,7 @@ final class CatOverlayController {
         wantsPlayback = false
         previewRequested = false
         dismissing = false
+        snoozeRequested = false
         suspendedSnapshot = nil
         reconciling = true
         for surface in Array(surfaces.values) { surface.hide() }
@@ -182,6 +189,7 @@ final class CatOverlayController {
             guard let self, !reconciling else { return }
             publishVisibility()
         }
+        surface.onSnoozeRequested = { [weak self] in self?.requestSnooze() }
         surface.onPreviewFinished = { [weak self] in self?.finishReminder() }
         surface.onDismissalFinished = { [weak self] in self?.finishDismissalIfReady() }
         return surface
@@ -196,7 +204,23 @@ final class CatOverlayController {
         onDismissalFinished?()
     }
 
+    private func requestSnooze() {
+        guard clickToSnooze, wantsPlayback, !previewRequested, !dismissing,
+              !snoozeRequested, let onSnoozeRequested else { return }
+        snoozeRequested = true
+        // Disarm every display before invoking the owner, even if its callback
+        // does not immediately start the dismissal animation.
+        updateClickInteraction()
+        onSnoozeRequested()
+    }
+
+    private func updateClickInteraction() {
+        let enabled = clickToSnooze && wantsPlayback && !previewRequested && !dismissing && !snoozeRequested
+        for surface in surfaces.values { surface.setClickToSnooze(enabled) }
+    }
+
     private func publishVisibility() {
+        updateClickInteraction()
         let visible = isVisible
         guard visible != lastVisibility else { return }
         lastVisibility = visible
@@ -210,6 +234,8 @@ final class CatOverlayController {
         result["selectedSide"] = selectedSide.rawValue
         result["displaySelection"] = displaySelection
         result["displayCount"] = surfaces.count
+        result["clickToSnooze"] = clickToSnooze
+        result["snoozeRequested"] = snoozeRequested
         result["displays"] = displayOrder.compactMap { surfaces[$0]?.diagnostics }
         return result
     }
@@ -242,6 +268,66 @@ enum OverlayCanvasLayout {
         return CGRect(x: side == .left ? bounds.minX : bounds.maxX - width,
                       y: bounds.minY, width: width, height: height)
     }
+}
+
+/// The capture panel covers only this rectangle, never the video canvas. Pixels
+/// are sampled off the main thread; expansion by one sample keeps thin fur/tails
+/// inside the target. Fully opaque buffers are rejected because they have lost
+/// the alpha channel and would otherwise turn a screen into a click blocker.
+enum OverlayCatBounds {
+    static func alphaBounds(bgra: UnsafeRawPointer, width: Int, height: Int,
+                            bytesPerRow: Int, sampleStep: Int = 4) -> CGRect? {
+        guard width > 0, height > 0, width <= Int.max / 4,
+              bytesPerRow >= width * 4, height <= Int.max / bytesPerRow else { return nil }
+        let step = max(1, sampleStep)
+        let bytes = bgra.assumingMemoryBound(to: UInt8.self)
+        var minX = width, minY = height, maxX = -1, maxY = -1
+        var foundTransparency = false
+        for y in stride(from: 0, to: height, by: step) {
+            for x in stride(from: 0, to: width, by: step) {
+                if bytes[y * bytesPerRow + x * 4 + 3] > 32 {
+                    minX = min(minX, x); minY = min(minY, y)
+                    maxX = max(maxX, x); maxY = max(maxY, y)
+                } else { foundTransparency = true }
+            }
+        }
+        guard maxX >= minX, maxY >= minY, foundTransparency else { return nil }
+        let left = max(0, minX - step), right = min(width, maxX + step + 1)
+        let top = max(0, minY - step), bottom = min(height, maxY + step + 1)
+        // Pixel buffers start at the top; AppKit's unflipped views start below.
+        return CGRect(x: Double(left) / Double(width), y: 1 - Double(bottom) / Double(height),
+                      width: Double(right - left) / Double(width), height: Double(bottom - top) / Double(height))
+    }
+
+    static func screenRect(normalizedBounds: CGRect, videoRect: CGRect) -> CGRect? {
+        guard [normalizedBounds.origin.x, normalizedBounds.origin.y, normalizedBounds.width, normalizedBounds.height,
+               videoRect.origin.x, videoRect.origin.y, videoRect.width, videoRect.height].allSatisfy(\.isFinite),
+              !normalizedBounds.isNull, !normalizedBounds.isInfinite,
+              !videoRect.isNull, !videoRect.isInfinite,
+              normalizedBounds.width > 0, normalizedBounds.height > 0,
+              videoRect.width > 0, videoRect.height > 0 else { return nil }
+        let unit = normalizedBounds.intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+        guard !unit.isEmpty else { return nil }
+        let target = CGRect(x: videoRect.minX + unit.minX * videoRect.width,
+                            y: videoRect.minY + unit.minY * videoRect.height,
+                            width: unit.width * videoRect.width, height: unit.height * videoRect.height)
+        let bounded = target.insetBy(dx: -2, dy: -2).intersection(videoRect)
+        // A malformed alpha frame must never make the entire video interactive.
+        guard bounded != videoRect else { return nil }
+        return bounded
+    }
+}
+
+/// Receives the first click without activating the app or making a key window.
+/// The transparent corners inside this small rectangle are deliberately consumed
+/// too, so a captured click cannot activate a button in an underlying app.
+private final class CatSnoozeView: NSView {
+    var onClick: (() -> Void)?
+    override var isOpaque: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseDown(with event: NSEvent) { onClick?() }
+    override func mouseUp(with event: NSEvent) {}
+    override func rightMouseDown(with event: NSEvent) {}
 }
 
 private final class CatVideoView: NSView {
@@ -285,6 +371,7 @@ private final class CatOverlaySurface {
     var onVisibilityChanged: ((Bool) -> Void)?
     var onDismissalFinished: (() -> Void)?
     var onPreviewFinished: (() -> Void)?
+    var onSnoozeRequested: (() -> Void)?
     private(set) var playbackState: PlaybackState = .hidden
     var isVisible: Bool { panel.isVisible }
     var isStarting: Bool { pendingResume != nil }
@@ -311,6 +398,16 @@ private final class CatOverlaySurface {
     private var pendingResume: OverlayPlaybackSnapshot?
     private var fullScreen = true
     private var aspectRatios: [OverlayVideoSide: CGFloat] = [:]
+    private var clickInteractionEnabled = false
+    private var inputPanel: CatOverlayPanel?
+    private var inputTimer: Timer?
+    private var inputOutput: AVPlayerItemVideoOutput?
+    private var inputItem: AVPlayerItem?
+    private var inputGeneration = 0
+    private var inputSamplePending = false
+    private var latestCatBounds: CGRect?
+    private var latestCatBoundsTime: CFTimeInterval = 0
+    private let inputQueue = DispatchQueue(label: "com.atomfilmlab.ecoflowcat.cat-alpha", qos: .utility)
 
     init(assetDirectory: URL, display: OverlayDisplay) {
         self.display = display
@@ -419,6 +516,7 @@ private final class CatOverlaySurface {
 
     /// AC reconnects: stop either video immediately, then pop the frozen image away.
     func finishReminder() {
+        stopClickSampling()
         if pendingResume != nil { hide(); return }
         guard playbackState != .hidden, playbackState != .dismissing else { return }
         sideSwitchTask?.cancel()
@@ -464,6 +562,7 @@ private final class CatOverlaySurface {
 
     /// Rebuilds the queue without changing window visibility or preview ownership.
     private func clearPlayback() {
+        stopClickSampling()
         generation += 1
         sideSwitchTask?.cancel()
         sideSwitchTask = nil
@@ -515,7 +614,13 @@ private final class CatOverlaySurface {
          "muted": player.isMuted,
          "playerRate": player.rate,
          "hasPopAnimation": videoView.playerLayer.animation(forKey: "dismissalPop") != nil,
-         "loopCount": looper?.loopCount ?? 0]
+         "loopCount": looper?.loopCount ?? 0,
+         "clickToSnooze": clickInteractionEnabled,
+         "snoozeTargetVisible": inputPanel?.isVisible ?? false,
+         "snoozeTargetFrame": NSStringFromRect(inputPanel?.frame ?? .zero),
+         "snoozeSampling": inputTimer != nil,
+         "snoozeTargetCanBecomeKey": inputPanel?.canBecomeKey ?? false,
+         "snoozeTargetCanBecomeMain": inputPanel?.canBecomeMain ?? false]
     }
 
     private func start(previewLoops: Int?) {
@@ -609,6 +714,7 @@ private final class CatOverlaySurface {
         } else {
             player.play()
         }
+        refreshClickSampling()
         return true
     }
 
@@ -655,9 +761,143 @@ private final class CatOverlaySurface {
     }
 
     deinit {
+        inputTimer?.invalidate()
         sideSwitchTask?.cancel()
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         if let failureObserver { NotificationCenter.default.removeObserver(failureObserver) }
+    }
+
+    func setClickToSnooze(_ enabled: Bool) {
+        clickInteractionEnabled = enabled
+        refreshClickSampling()
+    }
+
+    private func refreshClickSampling() {
+        guard clickInteractionEnabled, panel.isVisible, !isPreviewing,
+              playbackState == .intro || playbackState == .loop else {
+            stopClickSampling()
+            return
+        }
+        guard inputTimer == nil else { return }
+        let timer = Timer(timeInterval: 0.2, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.sampleCatBounds() }
+        }
+        inputTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+        sampleCatBounds()
+    }
+
+    private func stopClickSampling() {
+        inputTimer?.invalidate()
+        inputTimer = nil
+        resetClickOutput()
+    }
+
+    private func resetClickOutput() {
+        inputGeneration += 1
+        if let inputOutput, let inputItem { inputItem.remove(inputOutput) }
+        inputOutput = nil
+        inputItem = nil
+        inputSamplePending = false
+        latestCatBounds = nil
+        latestCatBoundsTime = 0
+        inputPanel?.orderOut(nil)
+    }
+
+    private func sampleCatBounds() {
+        guard inputTimer != nil, panel.isVisible,
+              playbackState == .intro || playbackState == .loop,
+              let item = player.currentItem else { return }
+        if inputItem !== item {
+            resetClickOutput()
+            let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+            ])
+            output.suppressesPlayerRendering = false
+            item.add(output)
+            inputItem = item
+            inputOutput = output
+        }
+        // Never leave a stale rectangle over the desktop after a stalled decode.
+        if CACurrentMediaTime() - latestCatBoundsTime > 0.6 { inputPanel?.orderOut(nil) }
+        guard !inputSamplePending, let output = inputOutput else { return }
+        let time = player.currentTime()
+        guard time.isValid, !time.isIndefinite else { return }
+        let expectedGeneration = inputGeneration
+        inputSamplePending = true
+        inputQueue.async { [weak self] in
+            var bounds: CGRect?
+            var decoded = false
+            if output.hasNewPixelBuffer(forItemTime: time),
+               let buffer = output.copyPixelBuffer(forItemTime: time, itemTimeForDisplay: nil),
+               CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_32BGRA {
+                CVPixelBufferLockBaseAddress(buffer, .readOnly)
+                if let base = CVPixelBufferGetBaseAddress(buffer) {
+                    decoded = true
+                    bounds = OverlayCatBounds.alphaBounds(bgra: base,
+                        width: CVPixelBufferGetWidth(buffer), height: CVPixelBufferGetHeight(buffer),
+                        bytesPerRow: CVPixelBufferGetBytesPerRow(buffer))
+                }
+                CVPixelBufferUnlockBaseAddress(buffer, .readOnly)
+            }
+            let result = bounds
+            let hasFrame = decoded
+            DispatchQueue.main.async {
+                guard let self, self.inputGeneration == expectedGeneration else { return }
+                self.inputSamplePending = false
+                guard self.inputTimer != nil, self.player.currentItem === item else { return }
+                if hasFrame {
+                    self.latestCatBounds = result
+                    self.latestCatBoundsTime = CACurrentMediaTime()
+                    self.positionInputPanel()
+                }
+            }
+        }
+    }
+
+    private func positionInputPanel() {
+        guard inputTimer != nil, panel.isVisible, let latestCatBounds,
+              CACurrentMediaTime() - latestCatBoundsTime <= 0.6,
+              videoView.playerLayer.isReadyForDisplay, let root = videoView.layer else {
+            inputPanel?.orderOut(nil)
+            return
+        }
+        videoView.layoutSubtreeIfNeeded()
+        let layerRect = root.convert(videoView.playerLayer.videoRect, from: videoView.playerLayer)
+        let windowRect = videoView.convert(layerRect, to: nil)
+        let videoRect = panel.convertToScreen(windowRect)
+        guard let target = OverlayCatBounds.screenRect(normalizedBounds: latestCatBounds, videoRect: videoRect),
+              target.width > 0, target.height > 0 else {
+            inputPanel?.orderOut(nil)
+            return
+        }
+        let capture: CatOverlayPanel
+        if let inputPanel { capture = inputPanel }
+        else {
+            capture = CatOverlayPanel(contentRect: target, styleMask: [.borderless, .nonactivatingPanel],
+                                      backing: .buffered, defer: false)
+            capture.title = "Nacho Power — Click cat to snooze"
+            capture.isOpaque = false
+            capture.backgroundColor = .clear
+            capture.hasShadow = false
+            capture.ignoresMouseEvents = false
+            capture.isMovable = false
+            capture.isMovableByWindowBackground = false
+            capture.hidesOnDeactivate = false
+            capture.becomesKeyOnlyIfNeeded = true
+            capture.isReleasedWhenClosed = false
+            capture.level = panel.level
+            capture.collectionBehavior = panel.collectionBehavior
+            let view = CatSnoozeView(frame: CGRect(origin: .zero, size: target.size))
+            view.onClick = { [weak self] in
+                guard let self, self.clickInteractionEnabled, self.inputTimer != nil else { return }
+                self.onSnoozeRequested?()
+            }
+            capture.contentView = view
+            inputPanel = capture
+        }
+        capture.setFrame(target, display: false)
+        capture.order(.above, relativeTo: panel.windowNumber)
     }
 
     private func positionPanel() {
@@ -668,6 +908,7 @@ private final class CatOverlaySurface {
         if fullScreen {
             panel.setFrame(display.frame, display: true)
             videoView.needsLayout = true
+            positionInputPanel()
             return
         }
         let available = display.visibleFrame
@@ -681,5 +922,6 @@ private final class CatOverlaySurface {
         let y = bottom ? available.minY + inset : available.maxY - displayHeight - inset
         panel.setFrame(NSRect(x: x, y: y, width: displayWidth, height: displayHeight), display: true)
         videoView.needsLayout = true
+        positionInputPanel()
     }
 }

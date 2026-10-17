@@ -146,6 +146,8 @@ final class AutomaticAppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate 
     }
 
     private func apply(_ preferences: AutomaticUpdatePreferences) {
+        SupportDiagnostics.shared.record(category: "updates", event: "settings_changed", details: [
+            "automaticChecks": preferences.checks, "automaticDownloads": preferences.downloads])
         let updater = controller.updater
         isApplyingPreferences = true
         // Turn downloading off first when disabling. Turn checks on before
@@ -176,6 +178,7 @@ final class AutomaticAppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate 
     }
 
     private func showError(_ error: Error) {
+        SupportDiagnostics.shared.record(category: "updates", event: "failed", details: SupportDiagnostics.errorDetails(error))
         pendingInstallation.clear()
         hasPendingInstallation = false
         errorMessage = error.localizedDescription
@@ -184,6 +187,7 @@ final class AutomaticAppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate 
     }
 
     func updater(_ updater: SPUUpdater, mayPerform updateCheck: SPUUpdateCheck) throws {
+        SupportDiagnostics.shared.record(category: "updates", event: "check_started")
         errorMessage = nil
         state = .checking
         onChange?()
@@ -196,6 +200,7 @@ final class AutomaticAppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate 
     }
 
     func updaterDidNotFindUpdate(_ updater: SPUUpdater, error: Error) {
+        SupportDiagnostics.shared.record(category: "updates", event: "check_finished")
         availableVersion = nil
         errorMessage = nil
         let reason = ((error as NSError).userInfo[SPUNoUpdateFoundReasonKey] as? NSNumber)?.intValue
@@ -216,12 +221,14 @@ final class AutomaticAppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate 
     }
 
     func updater(_ updater: SPUUpdater, willDownloadUpdate item: SUAppcastItem, with request: NSMutableURLRequest) {
+        SupportDiagnostics.shared.record(category: "updates", event: "download_started")
         state = .downloading
         onChange?()
     }
 
     func updater(_ updater: SPUUpdater, willInstallUpdateOnQuit item: SUAppcastItem,
                  immediateInstallationBlock immediateInstallHandler: @escaping () -> Void) -> Bool {
+        SupportDiagnostics.shared.record(category: "updates", event: "install_pending")
         availableVersion = item.displayVersionString
         state = .ready
         // Returning true retains this Sparkle session until its continuation is
@@ -236,6 +243,7 @@ final class AutomaticAppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate 
     }
 
     func updater(_ updater: SPUUpdater, willInstallUpdate item: SUAppcastItem) {
+        SupportDiagnostics.shared.record(category: "updates", event: "install_started")
         state = .installing
         onChange?()
     }

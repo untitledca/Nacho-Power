@@ -97,6 +97,93 @@ struct EcoFlowBluetoothSessionState {
         return date.timeIntervalSince(activity) > Self.maximumStreamSilence
     }
 
+    /// A read-only support view of field presence and freshness. It never
+    /// exposes device/account identifiers or pre-authentication measurements.
+    func diagnosticDetails(at date: Date) -> [String: Any] {
+        let reading = snapshot(deviceName: "", at: date)
+        var details: [String: Any] = [
+            "authenticated": isAuthenticated, "hasBattery": metrics.battery != nil,
+            "hasACFlag": metrics.acConnected != nil, "hasACVoltage": metrics.acInputVoltage != nil,
+            "hasACWatts": metrics.acWatts != nil, "hasTotalWatts": metrics.totalWatts != nil,
+            "acStatus": reading?.acConnected.map { $0 ? "connected" : "disconnected" } ?? "unknown",
+            "isStale": streamIsStale(at: date)
+        ]
+        func addAge(_ key: String, observed: Date?) {
+            guard let observed else { return }
+            let age = date.timeIntervalSince(observed)
+            if age.isFinite, age >= 0 { details[key] = age }
+        }
+        addAge("streamAge", observed: lastObservationAt ?? authenticatedAt)
+        addAge("batteryAge", observed: fieldDates["battery"])
+        addAge("acVoltageAge", observed: fieldDates["acInputVoltage"])
+        if !isAuthenticated { details["reason"] = "not_authenticated" }
+        else if streamIsStale(at: date) { details["reason"] = "stream_stale" }
+        else if lastObservationAt == nil { details["reason"] = "field_missing" }
+        else if metrics.acConnected != nil { details["reason"] = "explicit_flag" }
+        else if let voltage = metrics.acInputVoltage, let observed = fieldDates["acInputVoltage"] {
+            let age = date.timeIntervalSince(observed)
+            if !age.isFinite || age < 0 { details["reason"] = "voltage_invalid" }
+            else if age > Self.maximumVoltageAge { details["reason"] = "voltage_stale" }
+            else if (0...10).contains(voltage) || (80...300).contains(voltage) { details["reason"] = "input_voltage" }
+            else { details["reason"] = "voltage_ambiguous" }
+        } else { details["reason"] = "voltage_missing" }
+        if isAuthenticated {
+            // Retain the last measured values alongside their ages, so a report
+            // distinguishes stale voltage from a genuinely absent field.
+            if let value = metrics.battery { details["batteryPercentage"] = value }
+            if let value = metrics.acWatts { details["acInputWatts"] = value }
+            if let value = metrics.totalWatts { details["totalInputWatts"] = value }
+            if let value = metrics.acInputVoltage { details["acInputVoltage"] = value }
+            if let value = reading?.acConnected { details["acConnected"] = value }
+        }
+        return details
+    }
+
+    /// Describe only the telemetry envelope and top-level protobuf field IDs.
+    /// Field values, nested messages, authentication packets, and raw bytes are
+    /// excluded. Parsing here is observational and cannot alter transport state.
+    static func diagnosticPacketDetails(_ packet: EcoFlowWirelessProtocol.Packet) -> [String: Any] {
+        var details: [String: Any] = ["commandSet": Int(packet.commandSet),
+            "commandID": Int(packet.command), "payloadBytes": packet.payload.count]
+        guard packet.source == 2, packet.commandSet == 0xfe,
+              packet.command == 0x15 || packet.command == 0x16, packet.payload.count <= 32_768 else { return details }
+        let data = packet.payload
+        var cursor = 0
+        var fields = Set<Int>()
+        func varint() -> UInt64? {
+            var value: UInt64 = 0
+            for index in 0..<10 {
+                guard cursor < data.count else { return nil }
+                let byte = data[cursor]; cursor += 1
+                guard index < 9 || byte <= 1 else { return nil }
+                value |= UInt64(byte & 0x7f) << (index * 7)
+                if byte & 0x80 == 0 { return value }
+            }
+            return nil
+        }
+        parse: while cursor < data.count {
+            guard let tag = varint(), tag >> 3 > 0 else { break }
+            let field = tag >> 3
+            switch tag & 7 {
+            case 0: guard varint() != nil else { break parse }
+            case 1:
+                guard data.count - cursor >= 8 else { break parse }
+                cursor += 8
+            case 2:
+                guard let count = varint(), count <= UInt64(data.count - cursor) else { break parse }
+                cursor += Int(count)
+            case 5:
+                guard data.count - cursor >= 4 else { break parse }
+                cursor += 4
+            default: break parse
+            }
+            if field <= 65_535 { fields.insert(Int(field)) }
+            if fields.count >= 64 { break }
+        }
+        details["fieldIDs"] = fields.sorted()
+        return details
+    }
+
     func snapshot(deviceName: String, at date: Date) -> PowerTelemetry? {
         guard isAuthenticated, let observation = lastObservationAt,
               (-5...Self.maximumStreamSilence).contains(date.timeIntervalSince(observation)) else { return nil }

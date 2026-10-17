@@ -6,6 +6,7 @@ private let accent = Color(red: 0.40, green: 0.31, blue: 0.65)
 struct SettingsView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var updates: AutomaticAppUpdater
+    @ObservedObject var diagnostics: DiagnosticReportController
     @State private var accountEmail = ""
     @State private var accountPassword = ""
 
@@ -52,7 +53,7 @@ struct SettingsView: View {
                 Toggle("Enable reminders", isOn: $model.enabled)
                     .font(.system(size: 14, weight: .semibold)).toggleStyle(.switch)
                 Picker("Start the reminder", selection: $model.immediate) {
-                    Text("Immediately").tag(true)
+                    Text("When unplugged").tag(true)
                     Text("Below a battery level").tag(false)
                 }.pickerStyle(.segmented).labelsHidden()
                 if !model.immediate {
@@ -63,7 +64,24 @@ struct SettingsView: View {
                             .font(.system(size: 14, weight: .semibold, design: .monospaced)).frame(width: 45, alignment: .trailing)
                     }
                 }
+                HStack {
+                    Text("Show cat").foregroundStyle(.secondary)
+                    Slider(value: $model.reminderDelayMinutes, in: 0...60, step: 1)
+                        .accessibilityLabel("Delay before showing the cat")
+                        .accessibilityValue(model.reminderDelayText)
+                        .help("Move fully left for Immediately, or choose a delay from 1 to 60 minutes.")
+                    Text(model.reminderDelayText).monospacedDigit()
+                        .foregroundStyle(.secondary).frame(width: 118, alignment: .trailing)
+                }
+                if model.timedReminders {
+                    Text("Click the cat to hide it and wait another \(model.reminderIntervalText). It keeps looping until clicked or AC reconnects.")
+                        .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text("Immediately keeps the cat visible until AC reconnects. Clicks pass through to your desktop.")
+                        .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
                 Text(model.conditionText).font(.system(size: 12)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text("The intro plays once, the loop repeats, and reconnecting AC hides the cat with a pop.")
                     .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
@@ -119,7 +137,9 @@ struct SettingsView: View {
                             .monospacedDigit().foregroundStyle(.secondary).frame(width: 40, alignment: .trailing)
                     }
                 }
-                Text("The cat stays above your apps. Clicks and typing pass through to your desktop.")
+                Text(model.timedReminders
+                    ? "Click the cat to snooze it. Only the small area around it captures clicks; typing stays in your active app."
+                    : "The cat stays above your apps. Clicks and typing pass through to your desktop.")
                     .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
 
@@ -142,6 +162,8 @@ struct SettingsView: View {
                 Spacer()
                 if model.isPreviewing {
                     Button("End preview") { model.endPreview() }.controlSize(.large)
+                } else if model.canSnooze {
+                    Button("Snooze cat") { model.snoozeCat() }.controlSize(.large)
                 } else {
                     Button("Preview cat") { model.previewCat() }
                         .buttonStyle(.borderedProminent).tint(accent).foregroundStyle(.white).controlSize(.large)
@@ -151,6 +173,8 @@ struct SettingsView: View {
             Divider()
             AppUpdateSettingsView(updates: updates)
             Divider()
+            diagnosticsSettings
+            Divider()
             SupportView()
         }
         .padding(26)
@@ -159,6 +183,30 @@ struct SettingsView: View {
         .frame(width: 500, height: 720)
         .background(Color(nsColor: .windowBackgroundColor))
         .tint(accent)
+    }
+
+    private var diagnosticsSettings: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Diagnostics & support").font(.system(size: 14, weight: .semibold))
+            Text("Save recent app events, power readings, settings, and display sizes for troubleshooting. Account details, credentials, serial numbers, and network addresses are excluded.")
+                .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button(diagnostics.isExporting ? "Exporting…" : "Export report…") {
+                    diagnostics.exportReport(context: model.diagnosticContext)
+                }
+                .disabled(diagnostics.isExporting)
+                Button("Review report") { diagnostics.reviewReport() }
+                    .disabled(diagnostics.reportURL == nil || diagnostics.isExporting)
+                Button("Email report…") { diagnostics.emailReport() }
+                    .disabled(diagnostics.reportURL == nil || diagnostics.isExporting)
+            }
+            Text("Nothing is uploaded automatically. Email opens a draft to \(DiagnosticReportController.supportAddress); you review and send it.")
+                .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if let message = diagnostics.message {
+                Text(message).font(.system(size: 11)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 
     private var connectionSettings: some View {

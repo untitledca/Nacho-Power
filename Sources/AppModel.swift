@@ -13,6 +13,19 @@ final class AppModel: ObservableObject {
     @Published var threshold: Double {
         didSet { defaults.set(threshold, forKey: "batteryThreshold"); applySettings() }
     }
+    @Published var timedReminders: Bool {
+        didSet {
+            defaults.set(timedReminders, forKey: "timedReminders")
+            applySettings()
+            updateAppearance()
+        }
+    }
+    @Published var reminderIntervalMinutes: Double {
+        didSet {
+            defaults.set(reminderIntervalMinutes, forKey: "reminderIntervalMinutes")
+            applySettings()
+        }
+    }
     @Published var catWidth: Double {
         didSet { defaults.set(catWidth, forKey: "catWidth"); updateAppearance() }
     }
@@ -65,12 +78,16 @@ final class AppModel: ObservableObject {
     private var monitoringGeneration = 0
     private var isPolling = false
     private var screenObserver: NSObjectProtocol?
+    private var lastDiagnosticState = ""
+    private var lastDiagnosticSample = Date.distantPast
 
     init(assetDirectory: URL, defaults: UserDefaults = .standard) {
         self.defaults = defaults
         defaults.register(defaults: ["remindersEnabled": true,
                                      "immediateTrigger": true,
                                      "batteryThreshold": 50.0,
+                                     "timedReminders": false,
+                                     "reminderIntervalMinutes": 5.0,
                                      "catWidth": 540.0,
                                      "fullScreenAnimation": true,
                                      "animationDisplay": 0,
@@ -84,6 +101,9 @@ final class AppModel: ObservableObject {
         enabled = defaults.bool(forKey: "remindersEnabled")
         immediate = defaults.bool(forKey: "immediateTrigger")
         threshold = min(100, max(1, defaults.double(forKey: "batteryThreshold")))
+        timedReminders = defaults.bool(forKey: "timedReminders")
+        let savedInterval = defaults.double(forKey: "reminderIntervalMinutes")
+        reminderIntervalMinutes = savedInterval.isFinite ? min(60, max(1, savedInterval.rounded())) : 5
         catWidth = min(1000, max(240, defaults.double(forKey: "catWidth")))
         let savedCorner = OverlayCorner(rawValue: defaults.string(forKey: "catCorner") ?? "") ?? .bottomRight
         corner = savedCorner
@@ -98,6 +118,7 @@ final class AppModel: ObservableObject {
         appliedConfiguration = connectionConfiguration
         assetWarning = Self.readAssetWarning(in: assetDirectory)
         overlay.onPlaybackError = { [weak self] message in
+            SupportDiagnostics.shared.record(category: "overlay", event: "playback_failed", details: ["reason": "decode_failed"])
             self?.playbackError = message
             self?.isPreviewing = false
             self?.engine.cancel()
@@ -106,6 +127,7 @@ final class AppModel: ObservableObject {
         overlay.onVisibilityChanged = { [weak self] visible in
             guard let self else { return }
             isCatVisible = visible
+            SupportDiagnostics.shared.record(category: "overlay", event: visible ? "shown" : "hidden")
             if !visible {
                 isPreviewing = false
             }
@@ -116,6 +138,7 @@ final class AppModel: ObservableObject {
             engine.dismissalDidFinish()
             refreshStatus()
         }
+        overlay.onSnoozeRequested = { [weak self] in self?.snoozeCat() }
         screenObserver = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
                                                                 object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
@@ -167,13 +190,87 @@ final class AppModel: ObservableObject {
     var isConnected: Bool { connectionError == nil && telemetry != nil }
     var bluetoothAccountReady: Bool { !bluetoothUserID.isEmpty }
     var conditionText: String {
-        immediate ? "Start when AC power is absent."
-            : "Start when AC power is absent and battery is below \(Int(threshold.rounded()))%."
+        let condition = immediate ? "AC power is disconnected" : "AC is disconnected and battery is below \(Int(threshold.rounded()))%"
+        return timedReminders
+            ? "Wait \(reminderIntervalText) while \(condition), then show the cat."
+            : "Start when \(condition)."
+    }
+    var reminderIntervalText: String {
+        let minutes = Int(reminderIntervalMinutes.rounded())
+        return minutes == 1 ? "1 minute" : "\(minutes) minutes"
+    }
+    /// The slider's zero position is the original continuous reminder mode.
+    /// Keep the last nonzero interval in storage when switching to Immediately.
+    var reminderDelayMinutes: Double {
+        get { timedReminders ? reminderIntervalMinutes : 0 }
+        set {
+            guard newValue.isFinite else { return }
+            let minutes = min(60, max(0, newValue.rounded()))
+            if minutes == 0 {
+                if timedReminders { timedReminders = false }
+            } else {
+                if reminderIntervalMinutes != minutes { reminderIntervalMinutes = minutes }
+                if !timedReminders { timedReminders = true }
+            }
+        }
+    }
+    var reminderDelayText: String {
+        timedReminders ? "After \(reminderIntervalText)" : "Immediately"
+    }
+    var canSnooze: Bool { timedReminders && isCatVisible && !isPreviewing && engine.phase == .active }
+
+    /// Explicit safe fields only. Never export account, device, or display names/IDs.
+    var diagnosticContext: [String: Any] {
+        var details: [String: Any] = [
+            "transport": appliedConfiguration.transport.rawValue,
+            "hasSavedAccount": !appliedConfiguration.userID.isEmpty,
+            "hasCloudCredentials": !appliedConfiguration.accessKey.isEmpty && !appliedConfiguration.secretKey.isEmpty,
+            "hasSelectedStation": !appliedConfiguration.serialNumber.isEmpty,
+            "enabled": enabled, "immediate": immediate, "threshold": threshold,
+            "timedReminders": timedReminders, "intervalMinutes": reminderIntervalMinutes,
+            "snoozed": engine.isSnoozed, "catVisible": isCatVisible, "previewing": isPreviewing,
+            "suspended": suspended, "fullScreen": fullScreen, "catWidth": catWidth,
+            "corner": corner.rawValue, "side": fullScreenSide.rawValue,
+            "displayMode": displaySelection == OverlayDisplaySelection.all ? "all" :
+                (displaySelection == OverlayDisplaySelection.main ? "main" : (selectedDisplayIsUnavailable ? "fallback" : "selected")),
+            "displayCount": NSScreen.screens.count,
+            "displays": NSScreen.screens.map { screen -> [String: Any] in
+                var values: [String: Any] = ["width": screen.frame.width, "height": screen.frame.height,
+                                             "scale": screen.backingScaleFactor, "isPrimary": screen == NSScreen.screens.first]
+                if let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
+                    values["rotation"] = CGDisplayRotation(CGDirectDisplayID(id.uint32Value))
+                }
+                return values
+            },
+            "hasError": connectionError != nil,
+            "acStatus": telemetry?.acConnected.map { $0 ? "connected" : "disconnected" } ?? "unknown"
+        ]
+        if let reading = telemetry {
+            details["batteryPercentage"] = reading.batteryPercentage
+            details["acInputWatts"] = reading.acInputWatts
+            details["totalInputWatts"] = reading.totalInputWatts
+            details["observationAge"] = max(0, Date().timeIntervalSince(reading.timestamp))
+            let source = reading.sourceDescription.lowercased()
+            details["source"] = source.contains("bluetooth") ? "bluetooth" : (source.contains("usb") ? "usb" : "wifi")
+        }
+        if let deadline = engine.nextReminderAt {
+            details["secondsUntilReminder"] = max(0, deadline - Date.timeIntervalSinceReferenceDate)
+        }
+        return details
+    }
+
+    func snoozeCat() {
+        if isPreviewing { endPreview(); return }
+        guard canSnooze else { return }
+        SupportDiagnostics.shared.record(category: "reminder", event: "snooze", details: ["intervalMinutes": reminderIntervalMinutes])
+        execute(engine.snooze(at: Date.timeIntervalSinceReferenceDate))
+        refreshStatus()
     }
 
     func startMonitoring() {
         guard pollingTask == nil else { return }
         isStopped = false
+        SupportDiagnostics.shared.record(category: "app", event: "monitoring_started", details: diagnosticContext)
         monitoringGeneration += 1
         pollingTask = Task { [weak self] in
             await self?.prepareBluetoothAccount()
@@ -189,9 +286,10 @@ final class AppModel: ObservableObject {
             while !Task.isCancelled {
                 guard let self, !self.isStopped else { break }
                 if !self.suspended && !self.isPreviewing {
+                    let hadCountdown = self.engine.nextReminderAt != nil
                     let command = self.engine.tick(at: Date.timeIntervalSinceReferenceDate)
                     self.execute(command)
-                    if command != .none { self.refreshStatus() }
+                    if command != .none || hadCountdown || self.engine.nextReminderAt != nil { self.refreshStatus() }
                 }
                 do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { break }
             }
@@ -199,6 +297,7 @@ final class AppModel: ObservableObject {
     }
 
     func stop() {
+        SupportDiagnostics.shared.record(category: "app", event: "monitoring_stopped")
         isStopped = true
         monitoringGeneration += 1
         pollingTask?.cancel()
@@ -211,6 +310,7 @@ final class AppModel: ObservableObject {
     }
 
     func suspend() {
+        SupportDiagnostics.shared.record(category: "app", event: "sleep")
         suspended = true
         monitoringGeneration += 1
         monitor.stop()
@@ -224,6 +324,7 @@ final class AppModel: ObservableObject {
     func resume() {
         guard !isStopped else { return }
         suspended = false
+        SupportDiagnostics.shared.record(category: "app", event: "wake")
         monitoringGeneration += 1
         connectionError = "Refreshing after wake…"
         telemetry = nil
@@ -231,6 +332,7 @@ final class AppModel: ObservableObject {
     }
 
     func previewCat() {
+        SupportDiagnostics.shared.record(category: "overlay", event: "preview_started", details: diagnosticContext)
         _ = engine.cancel()
         overlay.hide()
         playbackError = nil
@@ -267,6 +369,7 @@ final class AppModel: ObservableObject {
             defaults.set(serialNumber.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "deviceSerialNumber")
             defaults.set(cloudRegion.rawValue, forKey: "cloudRegion")
             appliedConfiguration = connectionConfiguration
+            SupportDiagnostics.shared.record(category: "connection", event: "configuration_saved", details: diagnosticContext)
             monitoringGeneration += 1
             monitor.stop()
             telemetry = nil
@@ -278,6 +381,7 @@ final class AppModel: ObservableObject {
             refreshNow()
         } catch {
             connectionSettingsMessage = error.localizedDescription
+            SupportDiagnostics.shared.record(category: "connection", event: "failed", details: SupportDiagnostics.errorDetails(error))
         }
     }
 
@@ -331,8 +435,12 @@ final class AppModel: ObservableObject {
     }
 
     private func applySettings() {
+        SupportDiagnostics.shared.record(category: "reminder", event: "settings_changed", details: [
+            "enabled": enabled, "immediate": immediate, "threshold": threshold,
+            "timedReminders": timedReminders, "intervalMinutes": reminderIntervalMinutes])
         let command = engine.updateSettings(enabled: enabled,
                                             trigger: immediate ? .immediate : .belowBattery(threshold),
+                                            interval: timedReminders ? reminderIntervalMinutes * 60 : nil,
                                             at: Date.timeIntervalSinceReferenceDate)
         if !enabled && isPreviewing {
             // Preview keeps the policy engine canceled, so disabling cannot
@@ -347,9 +455,11 @@ final class AppModel: ObservableObject {
     }
 
     private func updateAppearance() {
+        SupportDiagnostics.shared.record(category: "overlay", event: "appearance", details: diagnosticContext)
         overlay.updateAppearance(width: CGFloat(catWidth), corner: corner,
                                  fullScreen: fullScreen, fullScreenSide: fullScreenSide,
-                                 displaySelection: displaySelection)
+                                 displaySelection: displaySelection,
+                                 clickToSnooze: timedReminders)
     }
 
     private func poll() async {
@@ -366,6 +476,7 @@ final class AppModel: ObservableObject {
             telemetry = reading
             connectionError = nil
             lastSuccessfulRead = reading.timestamp
+            recordDiagnosticSample()
             if !isPreviewing {
                 execute(engine.ingest(ReminderSample(acInputWatts: reading.reminderInputWatts,
                                                      batteryPercentage: reading.batteryPercentage,
@@ -377,6 +488,7 @@ final class AppModel: ObservableObject {
                   requestGeneration == monitoringGeneration else { return }
             connectionError = error.localizedDescription
             telemetry = nil
+            recordDiagnosticSample(error: error)
             if !isPreviewing {
                 execute(engine.ingest(ReminderSample(acInputWatts: nil, batteryPercentage: nil),
                                       at: Date.timeIntervalSinceReferenceDate))
@@ -387,6 +499,11 @@ final class AppModel: ObservableObject {
     }
 
     private func execute(_ command: ReminderCommand) {
+        if command != .none {
+            SupportDiagnostics.shared.record(category: "reminder", event: "decision", details: [
+                "action": command == .start ? "start" : (command == .finish ? "finish" : "cancel"),
+                "timedReminders": timedReminders, "intervalMinutes": reminderIntervalMinutes])
+        }
         switch command {
         case .none: break
         case .start:
@@ -397,6 +514,17 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func recordDiagnosticSample(error: Error? = nil) {
+        var details = diagnosticContext
+        if let error { details.merge(SupportDiagnostics.errorDetails(error)) { _, new in new } }
+        let state = "\(details["acStatus"] ?? "unknown")/\(details["source"] ?? "none")/\(error != nil)"
+        let now = Date()
+        guard state != lastDiagnosticState || now.timeIntervalSince(lastDiagnosticSample) >= 15 else { return }
+        lastDiagnosticState = state
+        lastDiagnosticSample = now
+        SupportDiagnostics.shared.record(category: "telemetry", event: error == nil ? "snapshot" : "failed", details: details)
+    }
+
     private func refreshStatus() {
         if playbackError != nil { phaseDescription = "Video needs attention" }
         else if isPreviewing { phaseDescription = "Previewing intro → loop → pop" }
@@ -405,11 +533,15 @@ final class AppModel: ObservableObject {
         else {
             switch engine.phase {
             case .idle:
-                if telemetry?.acConnected == false && !immediate {
+                if timedReminders, let deadline = engine.nextReminderAt {
+                    let seconds = max(0, Int(ceil(deadline - Date.timeIntervalSinceReferenceDate)))
+                    let remaining = "\(seconds / 60)m \(seconds % 60)s"
+                    phaseDescription = engine.isSnoozed ? "Snoozed · next cat in \(remaining)" : "Next cat in \(remaining)"
+                } else if telemetry?.acConnected == false && !immediate {
                     phaseDescription = "Waiting for battery below \(Int(threshold.rounded()))%"
                 } else { phaseDescription = "Monitoring power" }
-            case .active: phaseDescription = "Cat reminder active"
-            case .dismissing: phaseDescription = "AC restored · hiding cat"
+            case .active: phaseDescription = timedReminders ? "Cat reminder active · click to snooze" : "Cat reminder active"
+            case .dismissing: phaseDescription = engine.isSnoozed ? "Snoozed · hiding cat" : "Hiding cat…"
             }
         }
         onStatusChanged?()

@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 @MainActor
@@ -12,9 +13,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var lastDockStatus: DockPowerStatus?
     private var dockRefreshTimer: Timer?
     private let updates = AutomaticAppUpdater()
+    private let diagnostics = DiagnosticReportController()
+    private var diagnosticsObservation: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.regular)
+        SupportDiagnostics.shared.record(category: "app", event: "launch")
         let mainMenu = NSMenu()
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu()
@@ -27,6 +31,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         appMenu.addItem(quitItem)
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
+        // Use the responder chain so both SwiftUI text fields and secure fields
+        // receive standard macOS editing shortcuts through their field editor.
+        let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = editMenu
+        mainMenu.addItem(editItem)
         NSApplication.shared.mainMenu = mainMenu
         let assetDirectory = Bundle.main.resourceURL ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Assets")
         model = AppModel(assetDirectory: assetDirectory)
@@ -53,7 +71,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         updates.installationContext = { [weak self] in
             guard let self, let model else { return (true, true, true) }
             return (settingsWindow?.isVisible == true, model.isCatVisible,
-                    menuIsOpen || NSApplication.shared.modalWindow != nil)
+                    menuIsOpen || diagnostics.isExporting || NSApplication.shared.modalWindow != nil)
+        }
+        diagnosticsObservation = diagnostics.$isExporting.dropFirst().sink { [weak self] _ in
+            self?.scheduleAutomaticInstallationReview()
         }
         updates.start()
         // A stalled transport must not leave an old green/red percentage in
@@ -76,6 +97,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        SupportDiagnostics.shared.record(category: "app", event: "terminate")
         dockRefreshTimer?.invalidate()
         updates.stop()
         model?.stop()
@@ -131,6 +153,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         enabled.state = model.enabled ? .on : .off
         enabled.target = self
         menu.addItem(enabled)
+        if model.canSnooze {
+            let snooze = NSMenuItem(title: "Snooze for \(model.reminderIntervalText)", action: #selector(snoozeCat), keyEquivalent: "")
+            snooze.target = self
+            menu.addItem(snooze)
+        }
         let preview = NSMenuItem(title: model.isPreviewing ? "End preview" : "Preview cat", action: #selector(previewCat), keyEquivalent: "")
         preview.target = self
         menu.addItem(preview)
@@ -142,6 +169,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         check.target = self
         check.isEnabled = updates.canCheckForUpdates
         menu.addItem(check)
+        let report = NSMenuItem(title: "Export Diagnostic Report…", action: #selector(exportDiagnostics), keyEquivalent: "")
+        report.target = self
+        menu.addItem(report)
         menu.addItem(makeSupportMenuItem())
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit Nacho Power", action: #selector(quit), keyEquivalent: "q")
@@ -173,6 +203,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     @objc private func toggleEnabled() { model.enabled.toggle() }
+    @objc private func snoozeCat() { model.snoozeCat() }
+    @objc private func exportDiagnostics() {
+        showSettings()
+        diagnostics.exportReport(context: model.diagnosticContext)
+    }
     @objc private func previewCat() {
         if model.isPreviewing { model.endPreview() } else { model.previewCat() }
     }
@@ -204,7 +239,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     @objc private func showSettings() {
         if settingsWindow == nil {
-            let controller = NSHostingController(rootView: SettingsView(model: model, updates: updates))
+            let controller = NSHostingController(rootView: SettingsView(model: model, updates: updates, diagnostics: diagnostics))
             let window = NSWindow(contentViewController: controller)
             window.title = "Nacho Power"
             window.styleMask = [.titled, .closable, .miniaturizable]
