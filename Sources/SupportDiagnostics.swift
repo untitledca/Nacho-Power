@@ -29,7 +29,7 @@ final class SupportDiagnostics: @unchecked Sendable {
     ]
     static let reasons: Set<String> = [
         "none", "unknown", "startup", "user_requested", "settings_changed", "sleep", "wake",
-        "unavailable", "not_connected", "connecting", "disconnected", "timeout", "cancelled",
+        "unavailable", "official_app_running", "remembered_station_missing", "not_connected", "connecting", "disconnected", "timeout", "cancelled",
         "unauthorized", "powered_off", "unsupported", "authentication", "invalid_packet",
         "invalid_response", "network", "http_error", "rate_limited", "read_failed", "write_failed",
         "write_pending", "queue_pending", "poll_interval", "polling_not_needed", "not_ready",
@@ -49,6 +49,8 @@ final class SupportDiagnostics: @unchecked Sendable {
                   "authenticated", "hidden", "intro", "loop", "dismissing", "monitoring", "pending",
                   "reminding", "waiting", "disabled", "preview", "unknown"],
         "reason": reasons,
+        "blockingApp": ["ecoflow", "powermanager"],
+        "selectionMode": ["automatic", "explicit", "remembered"],
         "acStatus": ["connected", "disconnected", "unknown"],
         "action": ["none", "start", "finish", "cancel", "hide", "show", "preview", "reconnect"],
         "corner": ["bottomLeft", "bottomRight", "topLeft", "topRight"],
@@ -65,7 +67,7 @@ final class SupportDiagnostics: @unchecked Sendable {
         "hasACWatts", "hasTotalWatts", "enabled", "immediate", "fullScreen", "catVisible", "previewing",
         "suspended", "automaticChecks", "automaticDownloads", "isPrimary", "hasSavedAccount",
         "hasCloudCredentials", "hasSelectedStation", "hasError", "isStale", "isReady", "remindersEnabled",
-        "timedReminders", "snoozed"
+        "timedReminders", "snoozed", "hasRememberedStation"
     ]
     private static let numberRanges: [String: ClosedRange<Double>] = [
         "batteryPercentage": 0...100, "threshold": 0...100,

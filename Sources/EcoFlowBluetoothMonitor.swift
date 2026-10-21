@@ -12,6 +12,7 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
     private var phase = Phase.idle
     private var phaseStarted = Date.distantPast
     private var configuration = EcoFlowConnectionConfiguration()
+    private var stationPreference = EcoFlowWirelessProtocol.StationPreference()
     private var keyExchange: EcoFlowWirelessProtocol.KeyExchange?
     private var sessionKey: [UInt8] = []
     private var iv: [UInt8] = []
@@ -43,6 +44,7 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
 
     func snapshot(configuration newConfiguration: EcoFlowConnectionConfiguration) async throws -> PowerTelemetry {
         if configuration != newConfiguration { stop(); configuration = newConfiguration }
+        stationPreference.configure(accountID: configuration.userID, load: EcoFlowCredentialStore.read)
         guard !configuration.userID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw EcoFlowWirelessError.message("Sign in to your EcoFlow account in Connection settings to enable Bluetooth.")
         }
@@ -54,7 +56,12 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
             fail(EcoFlowWirelessError.message("EcoFlow Bluetooth readings stopped. Reconnecting…"), reason: "stream_stale")
         }
         if phase != .idle && phase != .ready && Date().timeIntervalSince(phaseStarted) > 20 {
-            fail(EcoFlowWirelessError.message("Bluetooth connection timed out. Close the EcoFlow app and keep the DELTA nearby."), reason: "timeout")
+            if phase == .scanning, targetSerial != nil {
+                fail(EcoFlowWirelessError.message("Waiting for your selected EcoFlow DELTA. Keep it on and nearby, and close other apps connected to it. To use another station, choose it in Connection settings."),
+                     reason: selectionMode == "remembered" ? "remembered_station_missing" : "timeout")
+            } else {
+                fail(EcoFlowWirelessError.message("Bluetooth connection timed out. Close the EcoFlow app and keep the DELTA nearby."), reason: "timeout")
+            }
         }
         if phase == .idle, Date() >= retryAfter, central.state == .poweredOn { scan() }
         let currentGeneration = generation
@@ -75,10 +82,18 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
 
     private var status: String {
         switch phase {
-        case .idle, .scanning: return "Looking for your EcoFlow DELTA over Bluetooth. Close the EcoFlow app."
+        case .idle, .scanning:
+            if targetSerial != nil { return "Waiting for your selected EcoFlow DELTA. Close other apps connected to it and keep it nearby." }
+            return "Looking for your EcoFlow DELTA over Bluetooth. Close the EcoFlow app."
         case .ready: return "Waiting for fresh EcoFlow Bluetooth readings…"
         default: return "Connecting and authenticating with the EcoFlow…"
         }
+    }
+
+    private var targetSerial: String? { stationPreference.targetSerial(explicitSerial: configuration.serialNumber) }
+    private var selectionMode: String {
+        if !EcoFlowWirelessProtocol.normalizedSerial(configuration.serialNumber).isEmpty { return "explicit" }
+        return stationPreference.rememberedSerial.isEmpty ? "automatic" : "remembered"
     }
 
     func stop() {
@@ -100,8 +115,9 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
         phase = value; phaseStarted = Date()
         if changed { recordDiagnostic("phase_changed", interval: 0) }
     }
-    private func fail(_ error: Error, delay: TimeInterval = 5, reason: String? = nil) {
-        var details = SupportDiagnostics.errorDetails(error)
+    private func fail(_ error: Error, delay: TimeInterval = 5, reason: String? = nil,
+                      diagnosticError: Error? = nil) {
+        var details = SupportDiagnostics.errorDetails(diagnosticError ?? error)
         details["reason"] = reason ?? Self.diagnosticErrorReason(error)
         recordDiagnostic("failure", details: details, interval: 0)
         stop(); failure = error; retryAfter = Date().addingTimeInterval(delay)
@@ -128,6 +144,10 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
         details["writeInProgress"] = writeInProgress
         details["writeCount"] = diagnosticWriteCount
         details["frameCount"] = diagnosticFrameCount
+        details["hasRememberedStation"] = !stationPreference.rememberedSerial.isEmpty
+        details["selectionMode"] = selectionMode
+        details["deviceCount"] = Set(scanCandidates.values.filter { $0.1.compatible }
+            .map { EcoFlowWirelessProtocol.normalizedSerial($0.1.serial) }).count
         if let writeStartedAt { details["writeAge"] = max(0, now.timeIntervalSince(writeStartedAt)) }
         if let advertisement, advertisement.supported {
             details["deviceModel"] = advertisement.deviceName == "EcoFlow DELTA 3 Plus" ? "DELTA 3 Plus" : "DELTA 3"
@@ -162,14 +182,22 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
 
     private func chooseCandidate() {
         guard !scanCandidates.isEmpty else { return }
-        central.stopScan()
-        guard scanCandidates.count == 1, let candidate = scanCandidates.values.first else {
+        let choice = EcoFlowWirelessProtocol.chooseStation(scanCandidates.values.map { $0.1 }, targetSerial: targetSerial)
+        let serial: String
+        switch choice {
+        case .waiting: return
+        case .multiple:
             fail(EcoFlowWirelessError.message("Multiple EcoFlow stations found. Enter the DELTA serial number in Connection settings."), delay: 30, reason: "multiple_devices"); return
-        }
-        guard candidate.1.supported else { fail(EcoFlowWirelessError.unsupportedDevice, delay: 60); return }
-        guard candidate.1.encryption == 7 else {
+        case .unsupported:
+            fail(EcoFlowWirelessError.unsupportedDevice, delay: 60); return
+        case .incompatibleSecurity:
             fail(EcoFlowWirelessError.message("This DELTA uses an unsupported Bluetooth security version. Use USB or Wi-Fi cloud."), delay: 60, reason: "unsupported"); return
+        case .station(let selected): serial = selected
         }
+        guard let candidate = scanCandidates.values.first(where: {
+            $0.1.compatible && EcoFlowWirelessProtocol.normalizedSerial($0.1.serial) == serial
+        }) else { return }
+        central.stopScan()
         advertisement = candidate.1; peripheral = candidate.0
         peripheral?.delegate = self; setPhase(.connecting)
         central.connect(candidate.0, options: nil)
@@ -185,10 +213,13 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
         guard phase == .scanning,
               let manufacturerData = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data,
               let advert = EcoFlowWirelessProtocol.Advertisement.parse(manufacturerData) else { return }
-        let selectedSerial = configuration.serialNumber.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        guard selectedSerial.isEmpty || advert.serial.uppercased() == selectedSerial else { return }
+        if let targetSerial {
+            guard EcoFlowWirelessProtocol.normalizedSerial(advert.serial) == targetSerial else { return }
+        } else {
+            guard advert.compatible else { return }
+        }
         scanCandidates[peripheral.identifier] = (peripheral, advert)
-        if !selectedSerial.isEmpty || Date().timeIntervalSince(phaseStarted) >= 3 { chooseCandidate() }
+        if targetSerial != nil || Date().timeIntervalSince(phaseStarted) >= 3 { chooseCandidate() }
     }
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         guard self.peripheral === peripheral else { return }
@@ -196,11 +227,11 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
     }
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         guard self.peripheral === peripheral else { return }
-        fail(EcoFlowWirelessError.message("Could not connect to the EcoFlow. Close its official app and retry."), reason: "not_connected")
+        fail(EcoFlowWirelessError.message("Could not connect to the EcoFlow. Close its official app and retry."), reason: "not_connected", diagnosticError: error)
     }
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         guard self.peripheral === peripheral else { return }
-        fail(EcoFlowWirelessError.message("EcoFlow Bluetooth disconnected. Reconnecting…"), reason: "disconnected")
+        fail(EcoFlowWirelessError.message("EcoFlow Bluetooth disconnected. Reconnecting…"), reason: "disconnected", diagnosticError: error)
     }
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         guard self.peripheral === peripheral else { return }
@@ -351,6 +382,11 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
                 let auth = digest.map { String(format: "%02X", $0) }.joined()
                 setPhase(.authenticating); try sendAuth(command: 0x86, payload: Array(auth.utf8))
             case .ownerAccepted:
+                if let advertisement {
+                    stationPreference.rememberAuthenticated(advertisement) { serial, key in
+                        try EcoFlowCredentialStore.write(serial, for: key)
+                    }
+                }
                 setPhase(.ready)
                 recordDiagnostic("authenticated", interval: 0)
                 try startRuntimePolling()

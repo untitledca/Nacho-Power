@@ -38,6 +38,70 @@ enum EcoFlowWirelessProtocol {
             return Advertisement(serial: sn, encryption: b.count > 24 ? (b[24] >> 3) & 7 : 7)
         }
         var supported: Bool { serial.hasPrefix("P351") || serial.hasPrefix("P231") }
+        var compatible: Bool { supported && encryption == 7 }
+    }
+
+    /// The remembered station is private, account-scoped connection metadata.
+    /// It is committed only after the device accepts owner authentication.
+    struct StationPreference {
+        private(set) var accountKey: String?
+        private(set) var rememberedSerial = ""
+
+        mutating func configure(accountID: String, load: (String) -> String) {
+            let nextKey = stationAccountKey(accountID)
+            guard accountKey != nextKey else { return }
+            accountKey = nextKey
+            rememberedSerial = nextKey.map { normalizedSerial(load($0)) } ?? ""
+        }
+
+        func targetSerial(explicitSerial: String) -> String? {
+            let explicit = normalizedSerial(explicitSerial)
+            if !explicit.isEmpty { return explicit }
+            return rememberedSerial.isEmpty ? nil : rememberedSerial
+        }
+
+        mutating func rememberAuthenticated(_ advertisement: Advertisement,
+                                           save: (String, String) throws -> Void) {
+            guard let accountKey, advertisement.compatible else { return }
+            let serial = normalizedSerial(advertisement.serial)
+            guard !serial.isEmpty else { return }
+            rememberedSerial = serial
+            // A locked/unavailable Keychain must not interrupt a live session.
+            try? save(serial, accountKey)
+        }
+    }
+
+    enum StationChoice: Equatable {
+        case waiting, station(String), multiple, unsupported, incompatibleSecurity
+    }
+
+    static func normalizedSerial(_ serial: String) -> String {
+        serial.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+    }
+
+    static func stationAccountKey(_ accountID: String) -> String? {
+        let account = accountID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !account.isEmpty else { return nil }
+        let digest = SHA256.hash(data: Data(account.utf8)).map { String(format: "%02x", $0) }.joined()
+        return "bluetooth.station.v1." + digest
+    }
+
+    /// A known target never falls back to somebody else's nearby station.
+    /// Fresh setup ignores incompatible neighbors, but remains ambiguous when
+    /// more than one distinct supported station is available.
+    static func chooseStation(_ advertisements: [Advertisement], targetSerial: String?) -> StationChoice {
+        if let targetSerial, !normalizedSerial(targetSerial).isEmpty {
+            let target = normalizedSerial(targetSerial)
+            let matches = advertisements.filter { normalizedSerial($0.serial) == target }
+            guard !matches.isEmpty else { return .waiting }
+            guard matches.contains(where: \.supported) else { return .unsupported }
+            guard matches.contains(where: \.compatible) else { return .incompatibleSecurity }
+            return .station(target)
+        }
+        let serials = Set(advertisements.filter(\.compatible).map { normalizedSerial($0.serial) })
+        guard !serials.isEmpty else { return .waiting }
+        guard serials.count == 1, let serial = serials.first else { return .multiple }
+        return .station(serial)
     }
 
     struct Packet {

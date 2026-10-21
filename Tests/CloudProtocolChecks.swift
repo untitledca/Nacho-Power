@@ -6,6 +6,12 @@ import Darwin
         guard condition else { fputs("FAIL \(message)\n", stderr); exit(1) }
     }
     static func main() throws {
+        check(EcoFlowConnectionMonitor.blockingAppKind(name: "EcoFlow", bundleIdentifier: "com.ef.EcoFlow") == "ecoflow",
+              "The local official EcoFlow app has a stable diagnostic category")
+        check(EcoFlowConnectionMonitor.blockingAppKind(name: "PowerManager", bundleIdentifier: "vendor.PowerManager") == "powermanager",
+              "The local PowerManager blocker has its own category")
+        check(EcoFlowConnectionMonitor.blockingAppKind(name: "Unrelated Client", bundleIdentifier: "example.client") == nil,
+              "Unrelated apps are not reported as known connection blockers")
         // Public worked example in EcoFlow Developer API signing documentation.
         // These are example strings, not the user's account credentials.
         let headers = EcoFlowCloudMonitor.signedHeaders(

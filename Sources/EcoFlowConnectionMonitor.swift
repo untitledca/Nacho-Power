@@ -61,20 +61,28 @@ final class EcoFlowConnectionMonitor {
     private var diagnosticThrottle = SupportDiagnosticThrottle()
     private var diagnosticOutcomes: [EcoFlowTransport: String] = [:]
 
-    static var officialAppIsRunning: Bool {
-        NSWorkspace.shared.runningApplications.contains {
-            let name = ($0.localizedName ?? "").lowercased()
-            let bundle = ($0.bundleIdentifier ?? "").lowercased()
-            return name == "ecoflow" || name == "powermanager"
-                || bundle == "com.ef.ecoflow" || bundle == "com.ecoflow" || bundle.contains("powermanager")
-        }
+    /// Classify only known app families. Never put arbitrary process names or
+    /// bundle identifiers in support reports. This cannot detect another Mac
+    /// or phone using the station's Bluetooth connection.
+    nonisolated static func blockingAppKind(name: String, bundleIdentifier: String) -> String? {
+        let name = name.lowercased()
+        let bundle = bundleIdentifier.lowercased()
+        if name == "ecoflow" || bundle == "com.ef.ecoflow" || bundle == "com.ecoflow" { return "ecoflow" }
+        if name == "powermanager" || bundle.contains("powermanager") { return "powermanager" }
+        return nil
+    }
+    private static var runningBlockingApp: String? {
+        NSWorkspace.shared.runningApplications.compactMap {
+            blockingAppKind(name: $0.localizedName ?? "", bundleIdentifier: $0.bundleIdentifier ?? "")
+        }.sorted().first
     }
     func snapshot(configuration: EcoFlowConnectionConfiguration) async throws -> PowerTelemetry {
-        guard !Self.officialAppIsRunning else {
+        if let blockingApp = Self.runningBlockingApp {
             bluetooth.stop()
-            if diagnosticThrottle.shouldRecord("official_app_running", at: Date()) {
+            if diagnosticThrottle.shouldRecord("official_app_running:" + blockingApp, at: Date()) {
                 SupportDiagnostics.shared.record(category: "connection", event: "failure",
-                    details: ["transport": configuration.transport.rawValue, "reason": "unavailable"])
+                    details: ["transport": configuration.transport.rawValue, "reason": "official_app_running",
+                              "blockingApp": blockingApp])
             }
             throw EcoFlowWirelessError.message("Quit the EcoFlow app / PowerManager so Nacho Power can connect to the DELTA.")
         }

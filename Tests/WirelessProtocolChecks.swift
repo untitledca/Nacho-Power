@@ -31,7 +31,9 @@ private func knownSecret(_ publicKey: UnsafePointer<UInt8>, _ privateKey: Unsafe
             ("protobuf presence, explicit AC at 0 W, and invalid readings", protobufFields),
             ("runtime status request matches the authenticated mobile route", runtimeRequest),
             ("runtime voltage schema, zero volts, and malformed boundaries", runtimeFields),
-            ("manufacturer identity, serial selection and encryption flags", advertisements)
+            ("manufacturer identity, serial selection and encryption flags", advertisements),
+            ("station selection ignores neighbors without switching remembered stations", stationSelection),
+            ("authenticated station memory is persistent, account-scoped and failure tolerant", stationMemory)
         ]
         var failures = 0
         for (name, test) in tests {
@@ -163,6 +165,92 @@ private func knownSecret(_ publicKey: UnsafePointer<UInt8>, _ privateKey: Unsafe
         advertisement[0] = 0x01
         try check(P.Advertisement.parse(Data(advertisement)) == nil, "foreign manufacturer ignored")
         try check(P.Advertisement.parse(Data([0xb5, 0xb5, 3])) == nil, "truncated advertisement ignored")
+    }
+
+    private static func stationSelection() throws {
+        let shared = P.Advertisement(serial: "P351SHARED1234567", encryption: 7)
+        let neighbor = P.Advertisement(serial: "P231NEARBY1234567", encryption: 7)
+        let unsupported = P.Advertisement(serial: "RIVERNEARBY12345", encryption: 7)
+        let incompatible = P.Advertisement(serial: "P351SECURE1234567", encryption: 6)
+        let sharedSet = [shared, neighbor, unsupported, incompatible]
+        try check(P.chooseStation(sharedSet, targetSerial: shared.serial) == .station(shared.serial),
+                  "a remembered shared DELTA remains the target with other stations nearby")
+        try check(P.chooseStation([neighbor, unsupported, incompatible], targetSerial: shared.serial) == .waiting,
+                  "a busy or absent remembered station cannot silently fall back to a neighbor")
+        try check(P.chooseStation(sharedSet, targetSerial: nil) == .multiple,
+                  "initial setup remains safe when two distinct compatible stations are nearby")
+        try check(P.chooseStation([shared, shared, unsupported, incompatible], targetSerial: nil) == .station(shared.serial),
+                  "duplicate advertisements of one serial do not count as multiple stations")
+        try check(P.chooseStation([shared, unsupported, incompatible], targetSerial: nil) == .station(shared.serial),
+                  "unsupported models and incompatible security do not block an available compatible DELTA")
+        try check(P.chooseStation([unsupported, incompatible], targetSerial: nil) == .waiting,
+                  "an initial scan does not select unsupported neighbors")
+        try check(P.chooseStation(sharedSet, targetSerial: unsupported.serial) == .unsupported,
+                  "an explicitly targeted unsupported model produces the specific unsupported result")
+        try check(P.chooseStation(sharedSet, targetSerial: incompatible.serial) == .incompatibleSecurity,
+                  "an explicitly targeted security mismatch produces the specific security result")
+        try check(P.chooseStation([shared], targetSerial: " p351shared1234567 \n") == .station(shared.serial),
+                  "target matching trims whitespace and ignores serial letter case")
+    }
+
+    private static func stationMemory() throws {
+        let station = P.Advertisement(serial: "P351SHARED1234567", encryption: 7)
+        let other = P.Advertisement(serial: "P231OTHER12345678", encryption: 7)
+        var saved: [String: String] = [:]
+        var saveCount = 0
+        var preference = P.StationPreference()
+        preference.configure(accountID: "fixture-owner-A") { saved[$0] ?? "" }
+        try check(preference.targetSerial(explicitSerial: "") == nil && saved.isEmpty,
+                  "account setup alone cannot remember or persist an unauthenticated advertisement")
+
+        // Route the same owner-acknowledgment cases as the monitor. Neither a
+        // rejection nor an unsolicited successful reply reaches the commit.
+        var session = EcoFlowBluetoothSessionState()
+        func receiveOwner(_ payload: [UInt8], stage: EcoFlowBluetoothSessionState.AuthenticationStage) throws {
+            let reply = P.Packet(source: 0x35, commandSet: 0x35, command: 0x86, payload: payload)
+            if case .ownerAccepted = try session.receive(reply, stage: stage, at: Date(timeIntervalSince1970: 100)) {
+                preference.rememberAuthenticated(station) { value, key in saved[key] = value; saveCount += 1 }
+            }
+        }
+        try expectFailure("rejected owner authentication must fail") {
+            try receiveOwner([1], stage: .awaitingOwnerAcknowledgment)
+        }
+        try receiveOwner([0], stage: .awaitingStatus)
+        try check(preference.rememberedSerial.isEmpty && saved.isEmpty && saveCount == 0,
+                  "failed or unsolicited authentication cannot remember a station")
+        try receiveOwner([0], stage: .awaitingOwnerAcknowledgment)
+        try check(preference.rememberedSerial == station.serial && saveCount == 1,
+                  "only accepted owner authentication commits the station")
+        let accountAKey = preference.accountKey
+        try check(preference.targetSerial(explicitSerial: " \n") == station.serial,
+                  "ordinary reconnects keep the authenticated target")
+        try check(preference.targetSerial(explicitSerial: " p231other12345678 ") == other.serial,
+                  "an explicit station overrides memory without replacing it before authentication")
+        try check(preference.rememberedSerial == station.serial, "selecting another station cannot itself change authenticated memory")
+        var relaunched = P.StationPreference()
+        relaunched.configure(accountID: "fixture-owner-A") { saved[$0] ?? "" }
+        try check(relaunched.targetSerial(explicitSerial: "") == station.serial,
+                  "relaunch loads the same authenticated station through injected persistence")
+        relaunched.configure(accountID: "fixture-owner-B") { saved[$0] ?? "" }
+        try check(relaunched.rememberedSerial.isEmpty && relaunched.accountKey != accountAKey,
+                  "changing accounts cannot inherit the previous account's target")
+        relaunched.rememberAuthenticated(other) { value, key in saved[key] = value }
+        relaunched.configure(accountID: "fixture-owner-A") { saved[$0] ?? "" }
+        try check(relaunched.rememberedSerial == station.serial,
+                  "returning to an account restores that account's own station")
+        relaunched.rememberAuthenticated(other) { _, _ in throw CheckError.failed("simulated locked Keychain") }
+        try check(relaunched.rememberedSerial == other.serial,
+                  "a persistence failure retains the authenticated in-memory station without throwing")
+        relaunched.configure(accountID: "  ") { _ in throwUnexpectedLoad() }
+        try check(relaunched.accountKey == nil && relaunched.rememberedSerial.isEmpty,
+                  "signing out clears station memory and never reads a global fallback")
+        try check(P.stationAccountKey(" abc\n") == "bluetooth.station.v1.ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                  "account keys use trimmed account IDs and a known SHA-256 vector")
+        try check(!(accountAKey ?? "").contains("fixture-owner-A"), "persistence keys contain no raw account identifier")
+    }
+
+    private static func throwUnexpectedLoad() -> String {
+        preconditionFailure("An empty account must not read station persistence")
     }
 
     private static func runtimeRequest() throws {

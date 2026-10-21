@@ -76,6 +76,18 @@ private struct SupportDiagnosticsChecks {
         ]
         check(SupportDiagnostics.sanitize(invalid).isEmpty,
               "Known keys cannot bypass privacy rules with arbitrary text, wrong types, or invalid numbers")
+        let reconnect = SupportDiagnostics.sanitize([
+            "reason": "official_app_running", "blockingApp": "ecoflow", "selectionMode": "remembered",
+            "hasRememberedStation": true, "deviceCount": 2, "serialNumber": "PRIVATE-STATION"
+        ])
+        check(reconnect["reason"] as? String == "official_app_running" &&
+              reconnect["blockingApp"] as? String == "ecoflow" &&
+              reconnect["hasRememberedStation"] as? Bool == true &&
+              reconnect["selectionMode"] as? String == "remembered" &&
+              reconnect["deviceCount"] as? Int == 2 && reconnect["serialNumber"] == nil,
+              "Reconnect diagnostics identify blockers and selection without station identities")
+        check(SupportDiagnostics.sanitize(["blockingApp": "Private Client App", "selectionMode": "PRIVATE-SERIAL"]).isEmpty,
+              "New reconnect fields accept only fixed categories, never arbitrary app names or identifiers")
         let error = NSError(domain: "private-domain@example.com", code: -1001,
                             userInfo: [NSLocalizedDescriptionKey: "password SECRET at /Users/private"])
         let normalized = SupportDiagnostics.errorDetails(error)
