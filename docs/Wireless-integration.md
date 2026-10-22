@@ -51,3 +51,11 @@ Deterministic session tests cover early telemetry withheld until owner authentic
 - [EcoFlow Developer general information](https://developer.ecoflow.com/us/document/generalInfo): public GET endpoints and request-signing algorithm. The tests include EcoFlow's published signature test vector.
 
 The complete redistributable license notices are bundled in `Resources/ThirdPartyNotices.txt`. Tests exercise cryptographic vectors, authentic captured packet grammar, framing/fragmentation, protobuf updates, invalid inputs, and the cloud signature. No real account IDs, API keys, serials, passwords, or login tokens are fixtures.
+
+## Two-station selection (v1.7.0)
+
+Connection settings now lists supported nearby BLE advertisements and connected USB metadata. Discovery does not connect or authenticate. A saved selection remains available when an already-connected station stops advertising. Two-station mode validates distinct, nonempty serials before replacing either applied connection. It can recover the first station's authenticated remembered identity when enabling the second.
+
+Each selected station owns a connection monitor, CBCentralManager, peripheral/session state, cloud cache, USB queue, cancellation generation, telemetry, and reconnect task. USB targets the selected station's reported serial; CDC input watts are read only from a port under that exact USB device parent. The primary remembered-station Keychain key is unchanged; secondary station memory uses an account-scoped secondary key. Diagnostic events identify only fixed primary/secondary slots, with station identifiers still excluded.
+
+Two local station sessions do not add multi-controller support to an individual EcoFlow. Close other apps holding either station's connection. Both Bluetooth stations must accept the saved owner's account identity. Pure tests cover isolation and aggregation; simultaneous two-station hardware execution remains unverified in this release session.

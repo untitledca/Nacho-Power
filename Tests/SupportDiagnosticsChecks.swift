@@ -88,6 +88,12 @@ private struct SupportDiagnosticsChecks {
               "Reconnect diagnostics identify blockers and selection without station identities")
         check(SupportDiagnostics.sanitize(["blockingApp": "Private Client App", "selectionMode": "PRIVATE-SERIAL"]).isEmpty,
               "New reconnect fields accept only fixed categories, never arbitrary app names or identifiers")
+        let twoStations = SupportDiagnostics.sanitize(["stationSlot": "secondary", "monitoredStationCount": 2,
+                                                        "serialNumber": "PRIVATE-SECOND-STATION"])
+        check(twoStations["stationSlot"] as? String == "secondary" && twoStations["monitoredStationCount"] as? Int == 2 && twoStations["serialNumber"] == nil,
+              "Two-station diagnostics distinguish fixed slots without recording identities")
+        check(SupportDiagnostics.sanitize(["stationSlot": "PRIVATE-SERIAL", "monitoredStationCount": 2.5]).isEmpty,
+              "Station slots and counts cannot carry arbitrary identifiers")
         let error = NSError(domain: "private-domain@example.com", code: -1001,
                             userInfo: [NSLocalizedDescriptionKey: "password SECRET at /Users/private"])
         let normalized = SupportDiagnostics.errorDetails(error)

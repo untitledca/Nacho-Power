@@ -18,7 +18,7 @@ enum DirectEcoFlowError: LocalizedError {
         switch self {
         case .powerManagerRunning: return "Quit EcoFlow PowerManager so Nacho Power can read the USB connection directly."
         case .noDevice: return "Connect a supported EcoFlow power station to this Mac by USB."
-        case .multipleDevices: return "Connect one EcoFlow power station at a time."
+        case .multipleDevices: return "Choose an EcoFlow station in Connection settings when several are connected by USB."
         case .unsupportedDevice: return "This EcoFlow does not expose the supported USB power readings."
         case .unavailable: return "Waiting for the EcoFlow USB connection."
         case .invalidReport: return "The EcoFlow returned an unreadable power reading."
@@ -34,19 +34,42 @@ enum DirectEcoFlowError: LocalizedError {
 final class DirectEcoFlowMonitor: @unchecked Sendable {
     private let queue = DispatchQueue(label: "EcoFlowCat.directUSB", qos: .utility)
     private var sequence: UInt32 = 0
+    private let generationLock = NSLock()
+    private var generation = 0
 
-    func snapshot() async throws -> PowerTelemetry {
-        try await withCheckedThrowingContinuation { continuation in
+    func snapshot(serialNumber: String = "") async throws -> PowerTelemetry {
+        try Task.checkCancellation()
+        let requestGeneration = currentGeneration
+        let reading = try await withCheckedThrowingContinuation { continuation in
             queue.async { [self] in
-                do { continuation.resume(returning: try readSnapshot()) }
+                do {
+                    guard currentGeneration == requestGeneration else { throw CancellationError() }
+                    let reading = try readSnapshot(serialNumber: serialNumber)
+                    guard currentGeneration == requestGeneration else { throw CancellationError() }
+                    continuation.resume(returning: reading)
+                }
                 catch { continuation.resume(throwing: error) }
             }
         }
+        try Task.checkCancellation()
+        return reading
     }
 
-    private func readSnapshot() throws -> PowerTelemetry {
+    /// In-flight system transfers have short deadlines; stopping this instance
+    /// discards their result and prevents its queued reads from starting.
+    func stop() {
+        generationLock.lock(); defer { generationLock.unlock() }
+        generation &+= 1
+    }
+
+    private var currentGeneration: Int {
+        generationLock.lock(); defer { generationLock.unlock() }
+        return generation
+    }
+
+    private func readSnapshot(serialNumber: String) throws -> PowerTelemetry {
         guard !Self.powerManagerIsRunning else { throw DirectEcoFlowError.powerManagerRunning }
-        let service = try EcoFlowUSBDiscovery.deviceService()
+        let service = try EcoFlowUSBDiscovery.deviceService(serialNumber: serialNumber)
         defer { IOObjectRelease(service) }
         // No DeviceCapture/DeviceSeize, SET_CONFIGURATION, reset, SET_REPORT,
         // output report, or access to unrelated USB devices.
@@ -77,7 +100,8 @@ final class DirectEcoFlowMonitor: @unchecked Sendable {
         var input: EcoFlowCDCMetrics?
         // Watts are optional only when this device/firmware cannot answer CDC.
         // A failed query never invents watts from the AC-present boolean.
-        if let path = EcoFlowUSBDiscovery.serialPath() {
+        if let registryID = EcoFlowUSBDiscovery.registryID(service),
+           let path = EcoFlowUSBDiscovery.serialPath(deviceRegistryID: registryID) {
             sequence &+= 1
             input = try? EcoFlowSerialReader.read(path: path, sequence: sequence)
         }
@@ -120,8 +144,56 @@ final class DirectEcoFlowMonitor: @unchecked Sendable {
     }
 }
 
+struct EcoFlowUSBDiscoveredDevice: Equatable, Sendable {
+    let registryID: UInt64
+    let serialNumber: String
+    let name: String
+}
+
 enum EcoFlowUSBDiscovery {
-    static func deviceService() throws -> io_service_t {
+    struct SerialEndpoint: Equatable {
+        let path: String
+        let deviceRegistryID: UInt64
+    }
+    /// Registry metadata only: listing stations never opens a USB device or CDC
+    /// port, and never sends a request to a station.
+    static func availableDevices() -> [EcoFlowUSBDiscoveredDevice] {
+        guard let devices = try? deviceServices() else { return [] }
+        defer { devices.forEach { IOObjectRelease($0) } }
+        return devices.compactMap { service in
+            guard let registryID = registryID(service) else { return nil }
+            return EcoFlowUSBDiscoveredDevice(registryID: registryID,
+                serialNumber: serialNumber(service),
+                name: (stringProperty(service, "USB Product Name") ?? "EcoFlow")
+                    .replacingOccurrences(of: "EF_UPS_", with: "EcoFlow "))
+        }
+    }
+
+    static func deviceService(serialNumber: String = "") throws -> io_service_t {
+        let devices = try deviceServices()
+        let selected: Int
+        do { selected = try selectedDeviceIndex(serialNumbers: devices.map { self.serialNumber($0) }, selectedSerial: serialNumber) }
+        catch {
+            devices.forEach { IOObjectRelease($0) }
+            throw error
+        }
+        for (index, service) in devices.enumerated() where index != selected { IOObjectRelease(service) }
+        return devices[selected]
+    }
+
+    /// Pure selection seam used by both USB transport and regression tests.
+    /// A missing selected station never falls back to the first USB device.
+    static func selectedDeviceIndex(serialNumbers: [String], selectedSerial: String) throws -> Int {
+        func normalize(_ value: String) -> String { value.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() }
+        let target = normalize(selectedSerial)
+        let matches = serialNumbers.indices.filter { target.isEmpty || normalize(serialNumbers[$0]) == target }
+        guard matches.count == 1, let selected = matches.first else {
+            throw matches.isEmpty ? DirectEcoFlowError.noDevice : DirectEcoFlowError.multipleDevices
+        }
+        return selected
+    }
+
+    private static func deviceServices() throws -> [io_service_t] {
         var iterator: io_iterator_t = 0
         guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOUSBHostDevice"), &iterator) == KERN_SUCCESS else {
             throw DirectEcoFlowError.unavailable
@@ -131,17 +203,14 @@ enum EcoFlowUSBDiscovery {
         while case let entry = IOIteratorNext(iterator), entry != 0 {
             if isEcoFlow(entry) { devices.append(entry) } else { IOObjectRelease(entry) }
         }
-        guard devices.count == 1 else {
-            devices.forEach { IOObjectRelease($0) }
-            throw devices.isEmpty ? DirectEcoFlowError.noDevice : DirectEcoFlowError.multipleDevices
-        }
-        return devices[0]
+        return devices
     }
 
-    static func serialPath() -> String? {
+    static func serialPath(deviceRegistryID: UInt64) -> String? {
         var iterator: io_iterator_t = 0
         guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOSerialBSDClient"), &iterator) == KERN_SUCCESS else { return nil }
         defer { IOObjectRelease(iterator) }
+        var endpoints: [SerialEndpoint] = []
         while case let entry = IOIteratorNext(iterator), entry != 0 {
             defer { IOObjectRelease(entry) }
             guard let path = stringProperty(entry, "IOCalloutDevice"), path.hasPrefix("/dev/cu.") else { continue }
@@ -149,18 +218,37 @@ enum EcoFlowUSBDiscovery {
             IOObjectRetain(parent)
             defer { IOObjectRelease(parent) }
             for _ in 0..<16 {
-                if isEcoFlow(parent) { return path }
+                if isEcoFlow(parent) {
+                    if let registryID = registryID(parent) {
+                        endpoints.append(SerialEndpoint(path: path, deviceRegistryID: registryID))
+                    }
+                    break
+                }
                 var next: io_registry_entry_t = 0
                 guard IORegistryEntryGetParentEntry(parent, kIOServicePlane, &next) == KERN_SUCCESS else { break }
                 IOObjectRelease(parent)
                 parent = next
             }
         }
-        return nil
+        return serialPath(in: endpoints, deviceRegistryID: deviceRegistryID)
+    }
+
+    static func serialPath(in endpoints: [SerialEndpoint], deviceRegistryID: UInt64) -> String? {
+        endpoints.filter { $0.deviceRegistryID == deviceRegistryID }.map(\.path).sorted().first
     }
 
     static func stringProperty(_ entry: io_registry_entry_t, _ key: String) -> String? {
         IORegistryEntryCreateCFProperty(entry, key as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() as? String
+    }
+
+    static func registryID(_ entry: io_registry_entry_t) -> UInt64? {
+        var value: UInt64 = 0
+        guard IORegistryEntryGetRegistryEntryID(entry, &value) == KERN_SUCCESS else { return nil }
+        return value
+    }
+
+    private static func serialNumber(_ entry: io_registry_entry_t) -> String {
+        (stringProperty(entry, "USB Serial Number") ?? "").trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
     }
 
     private static func isEcoFlow(_ entry: io_registry_entry_t) -> Bool {

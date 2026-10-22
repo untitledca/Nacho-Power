@@ -227,6 +227,13 @@ private func knownSecret(_ publicKey: UnsafePointer<UInt8>, _ privateKey: Unsafe
         try check(preference.targetSerial(explicitSerial: " p231other12345678 ") == other.serial,
                   "an explicit station overrides memory without replacing it before authentication")
         try check(preference.rememberedSerial == station.serial, "selecting another station cannot itself change authenticated memory")
+        var secondSlot = P.StationPreference()
+        secondSlot.configure(accountID: "fixture-owner-A", secondary: true) { saved[$0] ?? "" }
+        try check(secondSlot.rememberedSerial.isEmpty && secondSlot.accountKey != accountAKey,
+                  "a secondary stream does not inherit the primary slot's remembered station")
+        secondSlot.rememberAuthenticated(other) { value, key in saved[key] = value }
+        try check(accountAKey.flatMap { saved[$0] } == station.serial,
+                  "authenticating the secondary station cannot overwrite primary persistence")
         var relaunched = P.StationPreference()
         relaunched.configure(accountID: "fixture-owner-A") { saved[$0] ?? "" }
         try check(relaunched.targetSerial(explicitSerial: "") == station.serial,

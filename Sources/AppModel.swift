@@ -49,6 +49,13 @@ final class AppModel: ObservableObject {
     @Published var transport: EcoFlowTransport = .automatic
     @Published var bluetoothUserID = ""
     @Published var serialNumber = ""
+    @Published var secondStationEnabled = false {
+        didSet {
+            if secondStationEnabled && !oldValue { prepareSecondStationSelection() }
+        }
+    }
+    @Published var secondSerialNumber = ""
+    @Published var secondTransport: EcoFlowTransport = .automatic
     @Published var cloudRegion: EcoFlowCloudRegion = .global
     @Published var cloudAccessKey = ""
     @Published var cloudSecretKey = ""
@@ -58,6 +65,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var bluetoothSetupMessage = "Checking for your existing EcoFlow sign-in…"
     @Published private(set) var telemetry: PowerTelemetry?
     @Published private(set) var connectionError: String?
+    @Published private(set) var secondTelemetry: PowerTelemetry?
+    @Published private(set) var secondConnectionError: String?
+    @Published private(set) var secondLastSuccessfulRead: Date?
     @Published private(set) var playbackError: String?
     @Published private(set) var assetWarning: String?
     @Published private(set) var isPreviewing = false
@@ -68,18 +78,23 @@ final class AppModel: ObservableObject {
     var onStatusChanged: (() -> Void)?
     private let defaults: UserDefaults
     private let monitor = EcoFlowConnectionMonitor()
+    private let secondMonitor = EcoFlowConnectionMonitor()
     private var appliedConfiguration = EcoFlowConnectionConfiguration()
+    private var appliedSecondConfiguration: EcoFlowConnectionConfiguration?
     private let overlay: CatOverlayController
-    private var engine = ReminderEngine()
+    private var engine = MultiStationReminderPolicy()
     private var pollingTask: Task<Void, Never>?
+    private var secondPollingTask: Task<Void, Never>?
     private var staleDataTask: Task<Void, Never>?
     private var suspended = false
     private var isStopped = true
     private var monitoringGeneration = 0
+    private var secondMonitoringGeneration = 0
     private var isPolling = false
+    private var secondIsPolling = false
     private var screenObserver: NSObjectProtocol?
-    private var lastDiagnosticState = ""
-    private var lastDiagnosticSample = Date.distantPast
+    private var lastDiagnosticState: [String: String] = [:]
+    private var lastDiagnosticSample: [String: Date] = [:]
 
     init(assetDirectory: URL, defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -95,6 +110,9 @@ final class AppModel: ObservableObject {
         transport = EcoFlowTransport(rawValue: defaults.string(forKey: "connectionTransport") ?? "") ?? .automatic
         bluetoothUserID = EcoFlowCredentialStore.read("bluetoothUserID")
         serialNumber = defaults.string(forKey: "deviceSerialNumber") ?? ""
+        secondStationEnabled = defaults.bool(forKey: "secondStationEnabled")
+        secondSerialNumber = defaults.string(forKey: "secondDeviceSerialNumber") ?? ""
+        secondTransport = EcoFlowTransport(rawValue: defaults.string(forKey: "secondConnectionTransport") ?? "") ?? .automatic
         cloudRegion = EcoFlowCloudRegion(rawValue: defaults.string(forKey: "cloudRegion") ?? "") ?? .global
         cloudAccessKey = EcoFlowCredentialStore.read("cloudAccessKey")
         cloudSecretKey = EcoFlowCredentialStore.read("cloudSecretKey")
@@ -116,6 +134,20 @@ final class AppModel: ObservableObject {
         displaySelection = OverlayDisplaySelection.initialSelection(defaults: defaults, displays: displays)
         overlay = CatOverlayController(assetDirectory: assetDirectory)
         appliedConfiguration = connectionConfiguration
+        if secondStationEnabled {
+            do {
+                let configurations = try validatedConnectionConfigurations()
+                appliedConfiguration = configurations.primary
+                appliedSecondConfiguration = configurations.secondary
+                serialNumber = configurations.primary.serialNumber
+                _ = engine.setSecondStationEnabled(configurations.secondary != nil)
+            } catch {
+                // Corrupt or incomplete secondary settings cannot stop the
+                // existing primary station from reconnecting at startup.
+                secondConnectionError = error.localizedDescription
+                connectionSettingsMessage = error.localizedDescription
+            }
+        }
         assetWarning = Self.readAssetWarning(in: assetDirectory)
         overlay.onPlaybackError = { [weak self] message in
             SupportDiagnostics.shared.record(category: "overlay", event: "playback_failed", details: ["reason": "decode_failed"])
@@ -135,7 +167,7 @@ final class AppModel: ObservableObject {
         }
         overlay.onDismissalFinished = { [weak self] in
             guard let self else { return }
-            engine.dismissalDidFinish()
+            execute(engine.dismissalDidFinish())
             refreshStatus()
         }
         overlay.onSnoozeRequested = { [weak self] in self?.snoozeCat() }
@@ -172,22 +204,39 @@ final class AppModel: ObservableObject {
         }
     }
 
-    var batteryText: String { telemetry?.batteryPercentage.map { "\(Int($0.rounded()))%" } ?? "—" }
-    var inputText: String {
-        guard let watts = telemetry?.totalInputWatts, watts.isFinite else { return "—" }
+    var batteryText: String { Self.batteryText(telemetry) }
+    var inputText: String { Self.inputText(telemetry) }
+    var powerText: String { Self.powerText(telemetry, error: connectionError) }
+    var isConnected: Bool { connectionError == nil && telemetry != nil }
+    var secondBatteryText: String { Self.batteryText(secondTelemetry) }
+    var secondInputText: String { Self.inputText(secondTelemetry) }
+    var secondPowerText: String { Self.powerText(secondTelemetry, error: secondConnectionError) }
+    var monitorsSecondStation: Bool { appliedSecondConfiguration != nil }
+    var secondIsConnected: Bool { monitorsSecondStation && secondConnectionError == nil && secondTelemetry != nil }
+    var secondPhaseDescription: String {
+        guard monitorsSecondStation else { return secondStationEnabled ? "Choose a second station" : "Second station is off" }
+        return secondConnectionError == nil && secondTelemetry != nil ? "Monitoring power" : "Waiting for EcoFlow"
+    }
+
+    private static func batteryText(_ reading: PowerTelemetry?) -> String {
+        reading?.batteryPercentage.map { "\(Int($0.rounded()))%" } ?? "—"
+    }
+
+    private static func inputText(_ reading: PowerTelemetry?) -> String {
+        guard let watts = reading?.totalInputWatts, watts.isFinite else { return "—" }
         return watts.formatted(.number.precision(.fractionLength(0))) + " W"
     }
-    var powerText: String {
-        guard connectionError == nil, let telemetry else { return "Waiting for an EcoFlow connection" }
-        if telemetry.acConnected == false { return "On battery · AC disconnected" }
-        if telemetry.acConnected == true,
-           let watts = telemetry.acInputWatts ?? telemetry.totalInputWatts, watts > 0 {
+
+    private static func powerText(_ reading: PowerTelemetry?, error: String?) -> String {
+        guard error == nil, let reading else { return "Waiting for an EcoFlow connection" }
+        if reading.acConnected == false { return "On battery · AC disconnected" }
+        if reading.acConnected == true,
+           let watts = reading.acInputWatts ?? reading.totalInputWatts, watts > 0 {
             return "AC connected · input power detected"
         }
-        if telemetry.acConnected == true { return "AC connected · not drawing power" }
+        if reading.acConnected == true { return "AC connected · not drawing power" }
         return "AC status unavailable"
     }
-    var isConnected: Bool { connectionError == nil && telemetry != nil }
     var bluetoothAccountReady: Bool { !bluetoothUserID.isEmpty }
     var conditionText: String {
         let condition = immediate ? "AC power is disconnected" : "AC is disconnected and battery is below \(Int(threshold.rounded()))%"
@@ -220,12 +269,19 @@ final class AppModel: ObservableObject {
     var canSnooze: Bool { timedReminders && isCatVisible && !isPreviewing && engine.phase == .active }
 
     /// Explicit safe fields only. Never export account, device, or display names/IDs.
-    var diagnosticContext: [String: Any] {
+    var diagnosticContext: [String: Any] { diagnosticContext(station: .primary) }
+
+    private func diagnosticContext(station: EcoFlowStationSlot) -> [String: Any] {
+        let configuration = station == .primary ? appliedConfiguration : (appliedSecondConfiguration ?? appliedConfiguration)
+        let reading = station == .primary ? telemetry : secondTelemetry
+        let error = station == .primary ? connectionError : secondConnectionError
         var details: [String: Any] = [
-            "transport": appliedConfiguration.transport.rawValue,
-            "hasSavedAccount": !appliedConfiguration.userID.isEmpty,
-            "hasCloudCredentials": !appliedConfiguration.accessKey.isEmpty && !appliedConfiguration.secretKey.isEmpty,
-            "hasSelectedStation": !appliedConfiguration.serialNumber.isEmpty,
+            "transport": configuration.transport.rawValue,
+            "stationSlot": station.rawValue,
+            "monitoredStationCount": appliedSecondConfiguration == nil ? 1 : 2,
+            "hasSavedAccount": !configuration.userID.isEmpty,
+            "hasCloudCredentials": !configuration.accessKey.isEmpty && !configuration.secretKey.isEmpty,
+            "hasSelectedStation": !configuration.serialNumber.isEmpty,
             "enabled": enabled, "immediate": immediate, "threshold": threshold,
             "timedReminders": timedReminders, "intervalMinutes": reminderIntervalMinutes,
             "snoozed": engine.isSnoozed, "catVisible": isCatVisible, "previewing": isPreviewing,
@@ -242,10 +298,10 @@ final class AppModel: ObservableObject {
                 }
                 return values
             },
-            "hasError": connectionError != nil,
-            "acStatus": telemetry?.acConnected.map { $0 ? "connected" : "disconnected" } ?? "unknown"
+            "hasError": error != nil,
+            "acStatus": reading?.acConnected.map { $0 ? "connected" : "disconnected" } ?? "unknown"
         ]
-        if let reading = telemetry {
+        if let reading {
             details["batteryPercentage"] = reading.batteryPercentage
             details["acInputWatts"] = reading.acInputWatts
             details["totalInputWatts"] = reading.totalInputWatts
@@ -272,11 +328,21 @@ final class AppModel: ObservableObject {
         isStopped = false
         SupportDiagnostics.shared.record(category: "app", event: "monitoring_started", details: diagnosticContext)
         monitoringGeneration += 1
+        secondMonitoringGeneration += 1
         pollingTask = Task { [weak self] in
             await self?.prepareBluetoothAccount()
             while !Task.isCancelled {
                 guard let self, !self.isStopped else { break }
-                if !self.suspended { await self.poll() }
+                if !self.suspended { await self.poll(station: .primary) }
+                do { try await Task.sleep(nanoseconds: 2_000_000_000) } catch { break }
+            }
+        }
+        // Independent tasks ensure a slow/offline station never holds up the
+        // other station's reads or reconnection loop.
+        secondPollingTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self, !self.isStopped else { break }
+                if !self.suspended { await self.poll(station: .secondary) }
                 do { try await Task.sleep(nanoseconds: 2_000_000_000) } catch { break }
             }
         }
@@ -300,11 +366,15 @@ final class AppModel: ObservableObject {
         SupportDiagnostics.shared.record(category: "app", event: "monitoring_stopped")
         isStopped = true
         monitoringGeneration += 1
+        secondMonitoringGeneration += 1
         pollingTask?.cancel()
         pollingTask = nil
+        secondPollingTask?.cancel()
+        secondPollingTask = nil
         staleDataTask?.cancel()
         staleDataTask = nil
         monitor.stop()
+        secondMonitor.stop()
         _ = engine.cancel()
         overlay.hide()
     }
@@ -313,9 +383,13 @@ final class AppModel: ObservableObject {
         SupportDiagnostics.shared.record(category: "app", event: "sleep")
         suspended = true
         monitoringGeneration += 1
+        secondMonitoringGeneration += 1
         monitor.stop()
+        secondMonitor.stop()
         telemetry = nil
+        secondTelemetry = nil
         connectionError = "Sleeping"
+        secondConnectionError = appliedSecondConfiguration == nil ? nil : "Sleeping"
         refreshStatus()
         _ = engine.cancel()
         overlay.hide()
@@ -326,8 +400,11 @@ final class AppModel: ObservableObject {
         suspended = false
         SupportDiagnostics.shared.record(category: "app", event: "wake")
         monitoringGeneration += 1
+        secondMonitoringGeneration += 1
         connectionError = "Refreshing after wake…"
+        secondConnectionError = appliedSecondConfiguration == nil ? nil : "Refreshing after wake…"
         telemetry = nil
+        secondTelemetry = nil
         refreshStatus()
     }
 
@@ -360,23 +437,73 @@ final class AppModel: ObservableObject {
         return configuration
     }
 
+    /// Bluetooth stations often stop advertising while connected. Surface the
+    /// authenticated target once when enabling the second-station editor, so a
+    /// live primary selection remains visible without another discovery scan.
+    private func prepareSecondStationSelection() {
+        guard serialNumber.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let key = EcoFlowWirelessProtocol.stationAccountKey(bluetoothUserID) else { return }
+        let remembered = EcoFlowCredentialStore.read(key).trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        if !remembered.isEmpty { serialNumber = remembered }
+    }
+
+    private func validatedConnectionConfigurations() throws -> (primary: EcoFlowConnectionConfiguration, secondary: EcoFlowConnectionConfiguration?) {
+        var first = connectionConfiguration
+        if secondStationEnabled && first.serialNumber.isEmpty,
+           let key = EcoFlowWirelessProtocol.stationAccountKey(first.userID) {
+            first.serialNumber = EcoFlowCredentialStore.read(key)
+        }
+        let selections = try MultiStationSelection.validated(primary: first.serialNumber,
+                                                            secondary: secondSerialNumber,
+                                                            secondEnabled: secondStationEnabled)
+        first.serialNumber = selections.primary
+        first.stationSlot = .primary
+        guard secondStationEnabled else { return (first, nil) }
+        var second = first
+        second.stationSlot = .secondary
+        second.transport = secondTransport
+        second.serialNumber = selections.secondary
+        return (first, second)
+    }
+
     func saveConnectionSettings() {
         do {
+            // Validate all selections before persisting or stopping a working
+            // primary connection. An invalid secondary edit is harmless.
+            let configurations = try validatedConnectionConfigurations()
             try EcoFlowCredentialStore.write(bluetoothUserID.trimmingCharacters(in: .whitespacesAndNewlines), for: "bluetoothUserID")
             try EcoFlowCredentialStore.write(cloudAccessKey.trimmingCharacters(in: .whitespacesAndNewlines), for: "cloudAccessKey")
             try EcoFlowCredentialStore.write(cloudSecretKey.trimmingCharacters(in: .whitespacesAndNewlines), for: "cloudSecretKey")
             defaults.set(transport.rawValue, forKey: "connectionTransport")
-            defaults.set(serialNumber.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "deviceSerialNumber")
+            serialNumber = configurations.primary.serialNumber
+            defaults.set(serialNumber, forKey: "deviceSerialNumber")
             defaults.set(cloudRegion.rawValue, forKey: "cloudRegion")
-            appliedConfiguration = connectionConfiguration
+            defaults.set(secondStationEnabled, forKey: "secondStationEnabled")
+            secondSerialNumber = secondSerialNumber.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            defaults.set(secondSerialNumber, forKey: "secondDeviceSerialNumber")
+            defaults.set(secondTransport.rawValue, forKey: "secondConnectionTransport")
+            let primaryChanged = configurations.primary != appliedConfiguration
+            let secondaryChanged = configurations.secondary != appliedSecondConfiguration
+            appliedConfiguration = configurations.primary
+            appliedSecondConfiguration = configurations.secondary
+            if primaryChanged {
+                monitoringGeneration += 1
+                monitor.stop()
+                telemetry = nil
+                connectionError = "Connecting…"
+                execute(engine.reset(station: .primary))
+            }
+            if secondaryChanged {
+                secondMonitoringGeneration += 1
+                secondMonitor.stop()
+                secondTelemetry = nil
+                secondConnectionError = appliedSecondConfiguration == nil ? nil : "Connecting…"
+                execute(engine.reset(station: .secondary))
+            }
+            execute(engine.setSecondStationEnabled(appliedSecondConfiguration != nil))
             SupportDiagnostics.shared.record(category: "connection", event: "configuration_saved", details: diagnosticContext)
-            monitoringGeneration += 1
-            monitor.stop()
-            telemetry = nil
-            connectionError = "Connecting…"
-            _ = engine.cancel()
-            overlay.hide()
-            connectionSettingsMessage = "Saved. Checking your connection…"
+            connectionSettingsMessage = appliedSecondConfiguration == nil
+                ? "Saved. Checking your connection…" : "Saved. Checking both stations independently…"
             refreshStatus()
             refreshNow()
         } catch {
@@ -404,6 +531,7 @@ final class AppModel: ObservableObject {
             try EcoFlowCredentialStore.write(identifier, for: "bluetoothUserID")
             bluetoothUserID = identifier
             appliedConfiguration.userID = identifier
+            if appliedSecondConfiguration != nil { appliedSecondConfiguration?.userID = identifier }
             bluetoothSetupMessage = "Found your EcoFlow sign-in. Bluetooth connects automatically."
         } catch {
             bluetoothSetupMessage = error.localizedDescription
@@ -431,7 +559,8 @@ final class AppModel: ObservableObject {
     }
 
     func refreshNow() {
-        Task { [weak self] in await self?.poll() }
+        Task { [weak self] in await self?.poll(station: .primary) }
+        Task { [weak self] in await self?.poll(station: .secondary) }
     }
 
     private func applySettings() {
@@ -462,40 +591,72 @@ final class AppModel: ObservableObject {
                                  clickToSnooze: timedReminders)
     }
 
-    private func poll() async {
-        // Manual and periodic refreshes share one outstanding snapshot. This
-        // avoids queued reads and prevents one observation counting twice.
-        guard !isStopped, !suspended, !isPolling, !Task.isCancelled else { return }
-        isPolling = true
-        let requestGeneration = monitoringGeneration
-        defer { isPolling = false }
+    private func poll(station: EcoFlowStationSlot) async {
+        // Each lane shares its own periodic/manual read, never the other
+        // station's in-flight snapshot or generation.
+        guard !isStopped, !suspended, !Task.isCancelled else { return }
+        let selectedMonitor: EcoFlowConnectionMonitor
+        let configuration: EcoFlowConnectionConfiguration
+        let requestGeneration: Int
+        switch station {
+        case .primary:
+            guard !isPolling else { return }
+            isPolling = true
+            selectedMonitor = monitor
+            configuration = appliedConfiguration
+            requestGeneration = monitoringGeneration
+        case .secondary:
+            guard !secondIsPolling, let second = appliedSecondConfiguration else { return }
+            secondIsPolling = true
+            selectedMonitor = secondMonitor
+            configuration = second
+            requestGeneration = secondMonitoringGeneration
+        }
+        defer {
+            if station == .primary { isPolling = false } else { secondIsPolling = false }
+        }
         do {
-            let reading = try await monitor.snapshot(configuration: appliedConfiguration)
-            guard !isStopped, !suspended, !Task.isCancelled,
-                  requestGeneration == monitoringGeneration else { return }
-            telemetry = reading
-            connectionError = nil
-            lastSuccessfulRead = reading.timestamp
-            recordDiagnosticSample()
+            let reading = try await selectedMonitor.snapshot(configuration: configuration)
+            guard pollIsCurrent(station: station, generation: requestGeneration) else { return }
+            if station == .primary {
+                telemetry = reading
+                connectionError = nil
+                lastSuccessfulRead = reading.timestamp
+            } else {
+                secondTelemetry = reading
+                secondConnectionError = nil
+                secondLastSuccessfulRead = reading.timestamp
+            }
+            recordDiagnosticSample(station: station)
             if !isPreviewing {
                 execute(engine.ingest(ReminderSample(acInputWatts: reading.reminderInputWatts,
                                                      batteryPercentage: reading.batteryPercentage,
                                                      acConnected: reading.acConnected),
-                                      at: reading.timestamp.timeIntervalSinceReferenceDate))
+                                      station: station, at: reading.timestamp.timeIntervalSinceReferenceDate))
             }
         } catch {
-            guard !isStopped, !suspended, !Task.isCancelled,
-                  requestGeneration == monitoringGeneration else { return }
-            connectionError = error.localizedDescription
-            telemetry = nil
-            recordDiagnosticSample(error: error)
+            guard pollIsCurrent(station: station, generation: requestGeneration) else { return }
+            if station == .primary {
+                connectionError = error.localizedDescription
+                telemetry = nil
+            } else {
+                secondConnectionError = error.localizedDescription
+                secondTelemetry = nil
+            }
+            recordDiagnosticSample(station: station, error: error)
             if !isPreviewing {
                 execute(engine.ingest(ReminderSample(acInputWatts: nil, batteryPercentage: nil),
-                                      at: Date.timeIntervalSinceReferenceDate))
+                                      station: station, at: Date.timeIntervalSinceReferenceDate))
                 execute(engine.tick(at: Date.timeIntervalSinceReferenceDate))
             }
         }
         refreshStatus()
+    }
+
+    private func pollIsCurrent(station: EcoFlowStationSlot, generation: Int) -> Bool {
+        guard !isStopped, !suspended, !Task.isCancelled else { return false }
+        return station == .primary ? generation == monitoringGeneration
+            : appliedSecondConfiguration != nil && generation == secondMonitoringGeneration
     }
 
     private func execute(_ command: ReminderCommand) {
@@ -514,14 +675,15 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func recordDiagnosticSample(error: Error? = nil) {
-        var details = diagnosticContext
+    private func recordDiagnosticSample(station: EcoFlowStationSlot, error: Error? = nil) {
+        var details = diagnosticContext(station: station)
         if let error { details.merge(SupportDiagnostics.errorDetails(error)) { _, new in new } }
         let state = "\(details["acStatus"] ?? "unknown")/\(details["source"] ?? "none")/\(error != nil)"
         let now = Date()
-        guard state != lastDiagnosticState || now.timeIntervalSince(lastDiagnosticSample) >= 15 else { return }
-        lastDiagnosticState = state
-        lastDiagnosticSample = now
+        let slot = station.rawValue
+        guard state != lastDiagnosticState[slot] || now.timeIntervalSince(lastDiagnosticSample[slot] ?? .distantPast) >= 15 else { return }
+        lastDiagnosticState[slot] = state
+        lastDiagnosticSample[slot] = now
         SupportDiagnostics.shared.record(category: "telemetry", event: error == nil ? "snapshot" : "failed", details: details)
     }
 
@@ -529,7 +691,7 @@ final class AppModel: ObservableObject {
         if playbackError != nil { phaseDescription = "Video needs attention" }
         else if isPreviewing { phaseDescription = "Previewing intro → loop → pop" }
         else if !enabled { phaseDescription = "Reminders paused" }
-        else if connectionError != nil { phaseDescription = "Waiting for EcoFlow" }
+        else if connectionError != nil && !secondIsConnected && engine.phase == .idle { phaseDescription = "Waiting for EcoFlow" }
         else {
             switch engine.phase {
             case .idle:
@@ -537,9 +699,9 @@ final class AppModel: ObservableObject {
                     let seconds = max(0, Int(ceil(deadline - Date.timeIntervalSinceReferenceDate)))
                     let remaining = "\(seconds / 60)m \(seconds % 60)s"
                     phaseDescription = engine.isSnoozed ? "Snoozed · next cat in \(remaining)" : "Next cat in \(remaining)"
-                } else if telemetry?.acConnected == false && !immediate {
+                } else if (telemetry?.acConnected == false || secondTelemetry?.acConnected == false) && !immediate {
                     phaseDescription = "Waiting for battery below \(Int(threshold.rounded()))%"
-                } else { phaseDescription = "Monitoring power" }
+                } else { phaseDescription = appliedSecondConfiguration == nil ? "Monitoring power" : "Monitoring two stations" }
             case .active: phaseDescription = timedReminders ? "Cat reminder active · click to snooze" : "Cat reminder active"
             case .dismissing: phaseDescription = engine.isSnoozed ? "Snoozed · hiding cat" : "Hiding cat…"
             }

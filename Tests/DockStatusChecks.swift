@@ -28,6 +28,16 @@ struct DockStatusChecks {
         }
         precondition(status(78, ac: true, age: 29).acState == .connected)
 
+        let mixedTitle = DockStatusIcon.menuBarTitle(for: status(87, ac: true), second: status(42, ac: false))
+        precondition(mixedTitle.string == " 87% · 42%", "Each station keeps its own percentage in order")
+        let secondRange = (mixedTitle.string as NSString).range(of: "42%")
+        precondition((mixedTitle.attribute(.foregroundColor, at: 1, effectiveRange: nil) as? NSColor) == DockStatusIcon.color(for: .connected))
+        precondition((mixedTitle.attribute(.foregroundColor, at: secondRange.location, effectiveRange: nil) as? NSColor) == DockStatusIcon.color(for: .disconnected), "One green station cannot recolor a red station")
+        let unknownTitle = DockStatusIcon.menuBarTitle(for: status(87, ac: true), second: status(nil, ac: nil))
+        precondition(unknownTitle.string == " 87% · —")
+        precondition((unknownTitle.attribute(.foregroundColor, at: unknownTitle.length - 1, effectiveRange: nil) as? NSColor) == DockStatusIcon.color(for: .unknown))
+        precondition(DockStatusIcon.menuBarTitle(for: status(87, ac: true), second: nil).string == " 87%")
+
         if let previewPath = CommandLine.arguments.dropFirst().first {
             let folder = URL(fileURLWithPath: previewPath, isDirectory: true)
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -36,6 +46,19 @@ struct DockStatusChecks {
                             ("ac-disconnected", status(78, ac: false)),
                             ("unavailable", status(nil, ac: nil)),
                             ("full-battery", status(100, ac: true))]
+            let mixed = DockStatusIcon.image(for: status(87, ac: true), second: status(42, ac: false), logo: logo)
+            precondition(mixed.size == NSSize(width: 512, height: 512))
+            for size in [512, 64, 48] {
+                let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: size, pixelsHigh: size,
+                    bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                    colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+                NSGraphicsContext.saveGraphicsState()
+                NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
+                NSGraphicsContext.current?.imageInterpolation = .high
+                mixed.draw(in: NSRect(x: 0, y: 0, width: size, height: size))
+                NSGraphicsContext.restoreGraphicsState()
+                try bitmap.representation(using: .png, properties: [:])!.write(to: folder.appendingPathComponent("two-stations-\(size).png"))
+            }
             for (name, value) in previews {
                 let menuImage = DockStatusIcon.menuBarImage(for: value)
                 if let data = menuImage.tiffRepresentation,

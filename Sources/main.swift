@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var menuIsOpen = false
     private var dockLogo: NSImage?
     private var lastDockStatus: DockPowerStatus?
+    private var lastSecondDockStatus: DockPowerStatus?
     private var dockRefreshTimer: Timer?
     private let updates = AutomaticAppUpdater()
     private let diagnostics = DiagnosticReportController()
@@ -134,8 +135,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         menu.removeAllItems()
         addDisabled("Nacho Power", to: menu)
         addDisabled(model.phaseDescription, to: menu)
-        if model.isConnected {
-            addDisabled("Battery \(model.batteryText)   ·   Input \(model.inputText)", to: menu)
+        addDisabled("Station 1 · \(model.telemetry?.deviceName ?? "EcoFlow")", to: menu)
+        addDisabled("\(model.batteryText)   ·   \(model.powerText)", to: menu)
+        if model.monitorsSecondStation {
+            addDisabled("Station 2 · \(model.secondTelemetry?.deviceName ?? "EcoFlow")", to: menu)
+            addDisabled("\(model.secondBatteryText)   ·   \(model.secondPowerText)", to: menu)
         }
         if updates.hasPendingInstallation {
             let install = NSMenuItem(title: "Install Update & Relaunch…", action: #selector(installUpdate), keyEquivalent: "")
@@ -182,17 +186,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private func updatePowerIndicators() {
         guard let model else { return }
         let status = DockPowerStatus(telemetry: model.telemetry, isConnected: model.isConnected)
-        statusItem.button?.toolTip = "\(status.accessibilityDescription) · \(model.phaseDescription)"
-        statusItem.button?.setAccessibilityLabel(status.accessibilityDescription)
-        guard status != lastDockStatus else { return }
+        let second = model.monitorsSecondStation
+            ? DockPowerStatus(telemetry: model.secondTelemetry, isConnected: model.secondIsConnected) : nil
+        let description = second.map {
+            "Station 1: \(status.accessibilityDescription)\nStation 2: \($0.accessibilityDescription)"
+        } ?? status.accessibilityDescription
+        statusItem.button?.toolTip = "\(description) · \(model.phaseDescription)"
+        statusItem.button?.setAccessibilityLabel(description)
+        guard status != lastDockStatus || second != lastSecondDockStatus else { return }
         lastDockStatus = status
-        NSApplication.shared.applicationIconImage = DockStatusIcon.image(for: status, logo: dockLogo)
+        lastSecondDockStatus = second
+        NSApplication.shared.applicationIconImage = DockStatusIcon.image(for: status, second: second, logo: dockLogo)
         NSApplication.shared.dockTile.display()
         statusItem.button?.image = DockStatusIcon.menuBarImage(for: status)
-        statusItem.button?.attributedTitle = NSAttributedString(string: " \(status.percentageText)", attributes: [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold),
-            .foregroundColor: DockStatusIcon.color(for: status.acState)
-        ])
+        statusItem.button?.attributedTitle = DockStatusIcon.menuBarTitle(for: status, second: second)
         statusItem.button?.imagePosition = .imageLeading
     }
 

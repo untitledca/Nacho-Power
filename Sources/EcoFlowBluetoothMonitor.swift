@@ -44,7 +44,8 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
 
     func snapshot(configuration newConfiguration: EcoFlowConnectionConfiguration) async throws -> PowerTelemetry {
         if configuration != newConfiguration { stop(); configuration = newConfiguration }
-        stationPreference.configure(accountID: configuration.userID, load: EcoFlowCredentialStore.read)
+        stationPreference.configure(accountID: configuration.userID, secondary: configuration.stationSlot == .secondary,
+                                    load: EcoFlowCredentialStore.read)
         guard !configuration.userID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw EcoFlowWirelessError.message("Sign in to your EcoFlow account in Connection settings to enable Bluetooth.")
         }
@@ -139,6 +140,7 @@ final class EcoFlowBluetoothMonitor: NSObject, @preconcurrency CBCentralManagerD
         guard diagnosticThrottle.shouldRecord(key ?? event, at: now, interval: interval) else { return }
         var details = readings.diagnosticDetails(at: now)
         details["transport"] = "bluetooth"
+        details["stationSlot"] = configuration.stationSlot.rawValue
         details["phase"] = phase.rawValue
         details["queueDepth"] = pendingWrites.count
         details["writeInProgress"] = writeInProgress

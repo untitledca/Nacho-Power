@@ -51,6 +51,7 @@ final class SupportDiagnostics: @unchecked Sendable {
         "reason": reasons,
         "blockingApp": ["ecoflow", "powermanager"],
         "selectionMode": ["automatic", "explicit", "remembered"],
+        "stationSlot": ["primary", "secondary"],
         "acStatus": ["connected", "disconnected", "unknown"],
         "action": ["none", "start", "finish", "cancel", "hide", "show", "preview", "reconnect"],
         "corner": ["bottomLeft", "bottomRight", "topLeft", "topRight"],
@@ -81,12 +82,13 @@ final class SupportDiagnostics: @unchecked Sendable {
         "osPatch": 0...999, "errorCode": -1_000_000...1_000_000, "httpStatus": 100...599,
         "loopCount": 0...1_000_000, "frameCount": 0...1_000_000,
         "intervalMinutes": 0...10_080, "secondsUntilReminder": 0...604_800,
-        "deviceCount": 0...256, "usbDeviceCount": 0...256
+        "deviceCount": 0...256, "usbDeviceCount": 0...256,
+        "monitoredStationCount": 1...2
     ]
     private static let integers: Set<String> = [
         "commandSet", "commandID", "payloadBytes", "queueDepth", "writeCount", "retryCount", "displayCount",
         "osMajor", "osMinor", "osPatch", "errorCode", "httpStatus", "loopCount", "frameCount",
-        "deviceCount", "usbDeviceCount"
+        "deviceCount", "usbDeviceCount", "monitoredStationCount"
     ]
     private static let displayKeys: Set<String> = ["width", "height", "scale", "rotation", "isPrimary"]
     private let lock = NSLock()

@@ -21,6 +21,7 @@ struct EcoFlowConnectionConfiguration: Equatable, Sendable {
     var cloudRegion: EcoFlowCloudRegion = .global
     var accessKey = ""
     var secretKey = ""
+    var stationSlot: EcoFlowStationSlot = .primary
     var cloudConfigured: Bool { !serialNumber.isEmpty && !accessKey.isEmpty && !secretKey.isEmpty }
 }
 
@@ -55,11 +56,27 @@ enum EcoFlowCredentialStore {
 
 @MainActor
 final class EcoFlowConnectionMonitor {
+    typealias TransportSnapshot = (EcoFlowTransport, EcoFlowConnectionConfiguration) async throws -> PowerTelemetry
+    typealias DiagnosticRecorder = (String, String, [String: Any]) -> Void
     private let usb = DirectEcoFlowMonitor()
     private let bluetooth = EcoFlowBluetoothMonitor()
     private let cloud = EcoFlowCloudMonitor()
     private var diagnosticThrottle = SupportDiagnosticThrottle()
     private var diagnosticOutcomes: [EcoFlowTransport: String] = [:]
+    private var diagnosticStationSlot = EcoFlowStationSlot.primary
+    private var generation = 0
+    private let transportSnapshot: TransportSnapshot?
+    private let blockingApp: (() -> String?)?
+    private let diagnosticRecorder: DiagnosticRecorder?
+
+    /// Injectable I/O keeps lifecycle regression tests entirely local. Normal
+    /// app construction uses the concrete transports and production recorder.
+    init(transportSnapshot: TransportSnapshot? = nil, blockingApp: (() -> String?)? = nil,
+         diagnosticRecorder: DiagnosticRecorder? = nil) {
+        self.transportSnapshot = transportSnapshot
+        self.blockingApp = blockingApp
+        self.diagnosticRecorder = diagnosticRecorder
+    }
 
     /// Classify only known app families. Never put arbitrary process names or
     /// bundle identifiers in support reports. This cannot detect another Mac
@@ -77,52 +94,93 @@ final class EcoFlowConnectionMonitor {
         }.sorted().first
     }
     func snapshot(configuration: EcoFlowConnectionConfiguration) async throws -> PowerTelemetry {
-        if let blockingApp = Self.runningBlockingApp {
+        let requestGeneration = generation
+        try requireCurrent(requestGeneration)
+        diagnosticStationSlot = configuration.stationSlot
+        let detectedBlockingApp: String?
+        if let blockingApp { detectedBlockingApp = blockingApp() }
+        else { detectedBlockingApp = Self.runningBlockingApp }
+        if let blockingApp = detectedBlockingApp {
             bluetooth.stop()
             if diagnosticThrottle.shouldRecord("official_app_running:" + blockingApp, at: Date()) {
-                SupportDiagnostics.shared.record(category: "connection", event: "failure",
+                record(category: "connection", event: "failure",
                     details: ["transport": configuration.transport.rawValue, "reason": "official_app_running",
-                              "blockingApp": blockingApp])
+                              "blockingApp": blockingApp, "stationSlot": configuration.stationSlot.rawValue])
             }
             throw EcoFlowWirelessError.message("Quit the EcoFlow app / PowerManager so Nacho Power can connect to the DELTA.")
         }
         switch configuration.transport {
         case .usb:
-            bluetooth.stop(); return try await observedSnapshot(.usb) { try await usb.snapshot() }
+            bluetooth.stop(); return try await read(.usb, configuration: configuration, generation: requestGeneration)
         case .bluetooth:
-            return try await observedSnapshot(.bluetooth) { try await bluetooth.snapshot(configuration: configuration) }
+            return try await read(.bluetooth, configuration: configuration, generation: requestGeneration)
         case .wifi:
-            bluetooth.stop(); return try await observedSnapshot(.wifi) { try await cloud.snapshot(configuration: configuration) }
+            bluetooth.stop(); return try await read(.wifi, configuration: configuration, generation: requestGeneration)
         case .automatic:
             do {
-                let value = try await observedSnapshot(.usb) { try await usb.snapshot() }
+                let value = try await read(.usb, configuration: configuration, generation: requestGeneration)
+                try requireCurrent(requestGeneration)
                 bluetooth.stop(); return value
             } catch {
+                try requireCurrent(requestGeneration)
+                if error is CancellationError { throw error }
                 if !configuration.userID.isEmpty {
-                    do { return try await observedSnapshot(.bluetooth) { try await bluetooth.snapshot(configuration: configuration) } }
-                    catch { if !configuration.cloudConfigured { throw error } }
+                    do { return try await read(.bluetooth, configuration: configuration, generation: requestGeneration) }
+                    catch {
+                        try requireCurrent(requestGeneration)
+                        if error is CancellationError || !configuration.cloudConfigured { throw error }
+                    }
                 }
+                try requireCurrent(requestGeneration)
                 if configuration.cloudConfigured {
-                    return try await observedSnapshot(.wifi) { try await cloud.snapshot(configuration: configuration) }
+                    return try await read(.wifi, configuration: configuration, generation: requestGeneration)
                 }
                 throw EcoFlowWirelessError.message("Connect the DELTA by USB, or sign in under Connection settings for Bluetooth.")
             }
         }
     }
-    func stop() { bluetooth.stop() }
+    func stop() {
+        generation &+= 1
+        bluetooth.stop(); usb.stop()
+    }
+
+    private func requireCurrent(_ requestGeneration: Int) throws {
+        try Task.checkCancellation()
+        guard requestGeneration == generation else { throw CancellationError() }
+    }
+
+    private func read(_ transport: EcoFlowTransport, configuration: EcoFlowConnectionConfiguration,
+                      generation requestGeneration: Int) async throws -> PowerTelemetry {
+        try await observedSnapshot(transport, generation: requestGeneration) {
+            if let transportSnapshot { return try await transportSnapshot(transport, configuration) }
+            switch transport {
+            case .usb: return try await usb.snapshot(serialNumber: configuration.serialNumber)
+            case .bluetooth: return try await bluetooth.snapshot(configuration: configuration)
+            case .wifi: return try await cloud.snapshot(configuration: configuration)
+            case .automatic: throw EcoFlowWirelessError.message("Choose a concrete EcoFlow connection transport.")
+            }
+        }
+    }
+
+    private func record(category: String, event: String, details: [String: Any]) {
+        if let diagnosticRecorder { diagnosticRecorder(category, event, details) }
+        else { SupportDiagnostics.shared.record(category: category, event: event, details: details) }
+    }
 
     /// Observe existing attempts without changing their order, result, cadence,
     /// or error. Stable outcomes produce one compact record per 30 seconds.
-    private func observedSnapshot(_ transport: EcoFlowTransport,
+    private func observedSnapshot(_ transport: EcoFlowTransport, generation requestGeneration: Int,
                                   operation: () async throws -> PowerTelemetry) async throws -> PowerTelemetry {
         do {
+            try requireCurrent(requestGeneration)
             let value = try await operation()
+            try requireCurrent(requestGeneration)
             let ac = value.acConnected.map { $0 ? "connected" : "disconnected" } ?? "unknown"
             let outcome = "success:" + ac
             let changed = diagnosticOutcomes[transport] != outcome
             diagnosticOutcomes[transport] = outcome
             if diagnosticThrottle.shouldRecord(transport.rawValue, at: Date(), interval: changed ? 0 : 30) {
-                var details: [String: Any] = ["transport": transport.rawValue, "acStatus": ac,
+                var details: [String: Any] = ["transport": transport.rawValue, "stationSlot": diagnosticStationSlot.rawValue, "acStatus": ac,
                     "hasBattery": value.batteryPercentage != nil, "hasACStatus": value.acConnected != nil,
                     "hasACWatts": value.acInputWatts != nil, "hasTotalWatts": value.totalInputWatts != nil,
                     "observationAge": max(0, Date().timeIntervalSince(value.timestamp))]
@@ -130,10 +188,12 @@ final class EcoFlowConnectionMonitor {
                 if let watts = value.acInputWatts { details["acInputWatts"] = watts }
                 if let watts = value.totalInputWatts { details["totalInputWatts"] = watts }
                 if let connected = value.acConnected { details["acConnected"] = connected }
-                SupportDiagnostics.shared.record(category: transport.rawValue, event: "snapshot", details: details)
+                record(category: transport.rawValue, event: "snapshot", details: details)
             }
             return value
         } catch {
+            try requireCurrent(requestGeneration)
+            if error is CancellationError { throw error }
             let reason = Self.diagnosticErrorReason(error)
             let outcome = "failure:" + reason
             let changed = diagnosticOutcomes[transport] != outcome
@@ -141,8 +201,9 @@ final class EcoFlowConnectionMonitor {
             if diagnosticThrottle.shouldRecord(transport.rawValue, at: Date(), interval: changed ? 0 : 30) {
                 var details = SupportDiagnostics.errorDetails(error)
                 details["transport"] = transport.rawValue
+                details["stationSlot"] = diagnosticStationSlot.rawValue
                 details["reason"] = reason
-                SupportDiagnostics.shared.record(category: transport.rawValue, event: "failure", details: details)
+                record(category: transport.rawValue, event: "failure", details: details)
             }
             throw error
         }

@@ -47,8 +47,10 @@ enum EcoFlowWirelessProtocol {
         private(set) var accountKey: String?
         private(set) var rememberedSerial = ""
 
-        mutating func configure(accountID: String, load: (String) -> String) {
-            let nextKey = stationAccountKey(accountID)
+        mutating func configure(accountID: String, secondary: Bool = false, load: (String) -> String) {
+            // Keep the original primary key for existing installs. A second
+            // authenticated stream cannot replace the primary's remembered unit.
+            let nextKey = stationAccountKey(accountID).map { secondary ? $0 + ".secondary" : $0 }
             guard accountKey != nextKey else { return }
             accountKey = nextKey
             rememberedSerial = nextKey.map { normalizedSerial(load($0)) } ?? ""

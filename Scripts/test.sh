@@ -21,6 +21,7 @@ xcrun swiftc -parse-as-library -swift-version 5 \
     "$PROJECT_DIR/Sources/EcoFlowBluetoothSessionState.swift" \
     "$PROJECT_DIR/Sources/EcoFlowBluetoothMonitor.swift" \
     "$PROJECT_DIR/Sources/EcoFlowConnectionMonitor.swift" \
+    "$PROJECT_DIR/Sources/EcoFlowStationSlot.swift" \
     "$PROJECT_DIR/Tests/WirelessProtocolChecks.swift" \
     "$PROJECT_DIR/.build/ecoflow-crypto-tests.o" \
     -o "$PROJECT_DIR/.build/wireless-protocol-checks"
@@ -35,6 +36,7 @@ xcrun swiftc -parse-as-library -swift-version 5 \
     "$PROJECT_DIR/Sources/EcoFlowBluetoothSessionState.swift" \
     "$PROJECT_DIR/Sources/EcoFlowBluetoothMonitor.swift" \
     "$PROJECT_DIR/Sources/EcoFlowConnectionMonitor.swift" \
+    "$PROJECT_DIR/Sources/EcoFlowStationSlot.swift" \
     "$PROJECT_DIR/Tests/CloudProtocolChecks.swift" \
     "$PROJECT_DIR/.build/ecoflow-crypto-tests.o" \
     -o "$PROJECT_DIR/.build/cloud-protocol-checks"
@@ -109,3 +111,29 @@ xcrun swiftc -parse-as-library -swift-version 5 \
     "$PROJECT_DIR/.build/ecoflow-crypto-tests.o" \
     -o "$PROJECT_DIR/.build/bluetooth-diagnostic-checks"
 "$PROJECT_DIR/.build/bluetooth-diagnostic-checks"
+
+# Nearby station metadata and serial targeting never open a telemetry session.
+xcrun swiftc -parse-as-library -swift-version 5 \
+    "$PROJECT_DIR/Sources/TelemetryModels.swift" \
+    "$PROJECT_DIR/Sources/SupportDiagnostics.swift" \
+    "$PROJECT_DIR/Sources/DirectEcoFlowMonitor.swift" \
+    "$PROJECT_DIR/Sources/EcoFlowWirelessProtocol.swift" \
+    "$PROJECT_DIR/Sources/EcoFlowSessionKeyData.swift" \
+    "$PROJECT_DIR/Sources/EcoFlowBluetoothSessionState.swift" \
+    "$PROJECT_DIR/Sources/EcoFlowBluetoothMonitor.swift" \
+    "$PROJECT_DIR/Sources/EcoFlowConnectionMonitor.swift" \
+    "$PROJECT_DIR/Sources/EcoFlowStationSlot.swift" \
+    "$PROJECT_DIR/Sources/EcoFlowStationDiscovery.swift" \
+    "$PROJECT_DIR/Tests/StationDiscoveryChecks.swift" \
+    "$PROJECT_DIR/.build/ecoflow-crypto-tests.o" \
+    -o "$PROJECT_DIR/.build/station-discovery-checks"
+"$PROJECT_DIR/.build/station-discovery-checks"
+
+# Independent physical observations and timers; no device or app interaction.
+xcrun swiftc -parse-as-library -swift-version 5 \
+    "$PROJECT_DIR/Sources/ReminderEngine.swift" \
+    "$PROJECT_DIR/Sources/EcoFlowStationSlot.swift" \
+    "$PROJECT_DIR/Sources/MultiStationReminderPolicy.swift" \
+    "$PROJECT_DIR/Tests/MultiStationReminderChecks.swift" \
+    -o "$PROJECT_DIR/.build/multi-station-reminder-checks"
+"$PROJECT_DIR/.build/multi-station-reminder-checks"

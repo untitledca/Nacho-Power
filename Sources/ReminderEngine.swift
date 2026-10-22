@@ -162,6 +162,21 @@ struct ReminderEngine {
         return .finish
     }
 
+    /// A shared cat can be snoozed while another station is still counting
+    /// down. Give that already-eligible timer a full interval from the click,
+    /// without pretending that its last telemetry observation happened now.
+    mutating func deferPendingReminder(at timestamp: TimeInterval) -> ReminderCommand {
+        guard enabled, phase == .idle, let interval, nextReminderAt != nil,
+              latestSampleEligible, timestamp.isFinite,
+              lastAcceptedAt.map({ timestamp >= $0 }) ?? true else { return .none }
+        let expiration = expireTelemetry(at: timestamp)
+        guard expiration == .none, latestSampleEligible else { return expiration }
+        lastAcceptedAt = timestamp
+        nextReminderAt = timestamp + interval
+        isSnoozed = true
+        return .none
+    }
+
     /// Trigger changes take effect on the next reading. Disabling immediately
     /// hides either the reminder loop or an in-progress pop animation.
     mutating func updateSettings(

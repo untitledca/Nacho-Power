@@ -44,6 +44,52 @@ struct DockPowerStatus: Equatable {
 }
 
 enum DockStatusIcon {
+    static func menuBarTitle(for first: DockPowerStatus, second: DockPowerStatus?) -> NSAttributedString {
+        let title = NSMutableAttributedString(string: "")
+        func append(_ text: String, state: DockPowerStatus.ACState) {
+            title.append(NSAttributedString(string: text, attributes: [
+                .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold),
+                .foregroundColor: color(for: state)
+            ]))
+        }
+        append(" \(first.percentageText)", state: first.acState)
+        if let second {
+            title.append(NSAttributedString(string: " · ", attributes: [.foregroundColor: NSColor.secondaryLabelColor]))
+            append(second.percentageText, state: second.acState)
+        }
+        return title
+    }
+
+    /// Each station retains its own percentage and AC color. Never average the
+    /// batteries or let one connected station turn the other's badge green.
+    static func image(for first: DockPowerStatus, second: DockPowerStatus?, logo: NSImage?) -> NSImage {
+        guard let second else { return image(for: first, logo: logo) }
+        let base = image(for: first, logo: logo)
+        return NSImage(size: NSSize(width: 512, height: 512), flipped: false) { rect in
+            base.draw(in: rect)
+            NSGraphicsContext.saveGraphicsState()
+            defer { NSGraphicsContext.restoreGraphicsState() }
+            let transform = NSAffineTransform()
+            transform.translateX(by: rect.minX, yBy: rect.minY)
+            transform.scale(by: rect.width / 512)
+            transform.concat()
+            for (index, status) in [first, second].enumerated() {
+                let row = NSRect(x: 18, y: index == 0 ? 116 : 12, width: 476, height: 104)
+                color(for: status.acState).setFill()
+                NSBezierPath(roundedRect: row, xRadius: 34, yRadius: 34).fill()
+                let text = "\(index + 1)  \(status.percentageText)" as NSString
+                let attributes: [NSAttributedString.Key: Any] = [
+                    .font: NSFont.monospacedDigitSystemFont(ofSize: 79, weight: .heavy),
+                    .foregroundColor: NSColor.white
+                ]
+                let size = text.size(withAttributes: attributes)
+                text.draw(at: NSPoint(x: row.midX - size.width / 2,
+                                     y: row.midY - size.height / 2), withAttributes: attributes)
+            }
+            return true
+        }
+    }
+
     static func menuBarImage(for status: DockPowerStatus) -> NSImage {
         let battery = status.batteryPercentage ?? 0
         let level = battery < 13 ? 0 : battery < 38 ? 25 : battery < 63 ? 50 : battery < 88 ? 75 : 100

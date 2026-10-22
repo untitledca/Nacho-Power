@@ -5,6 +5,7 @@ struct DirectEcoFlowChecks {
     static func main() async throws {
         try protocolChecks()
         try descriptorChecks()
+        try usbSelectionChecks()
         telemetryDecisionChecks()
         if CommandLine.arguments.contains("--live") {
             let monitor = DirectEcoFlowMonitor()
@@ -15,6 +16,36 @@ struct DirectEcoFlowChecks {
             }
         }
         print("Direct EcoFlow checks passed")
+    }
+
+    static func usbSelectionChecks() throws {
+        try check(EcoFlowUSBDiscovery.selectedDeviceIndex(serialNumbers: [""], selectedSerial: "") == 0,
+              "One unidentified USB device preserves existing automatic USB behavior")
+        rejects("Multiple unselected USB stations require a choice") {
+            _ = try EcoFlowUSBDiscovery.selectedDeviceIndex(serialNumbers: ["P351ALPHA12345678", "P351BRAVO12345678"], selectedSerial: "")
+        }
+        let serials = ["P351ALPHA12345678", "P351BRAVO12345678"]
+        try check(EcoFlowUSBDiscovery.selectedDeviceIndex(serialNumbers: serials, selectedSerial: " p351alpha12345678 \n") == 0,
+              "Selected USB station matches after serial normalization")
+        try check(EcoFlowUSBDiscovery.selectedDeviceIndex(serialNumbers: serials, selectedSerial: "P351BRAVO12345678") == 1,
+              "Two monitor selections resolve to distinct USB devices")
+        rejects("Missing selected USB station cannot fall back to a connected neighbor") {
+            _ = try EcoFlowUSBDiscovery.selectedDeviceIndex(serialNumbers: [serials[1]], selectedSerial: serials[0])
+        }
+        rejects("Duplicate USB serials cannot choose an arbitrary device") {
+            _ = try EcoFlowUSBDiscovery.selectedDeviceIndex(serialNumbers: [serials[0], serials[0]], selectedSerial: serials[0])
+        }
+        rejects("No USB devices remains unavailable") {
+            _ = try EcoFlowUSBDiscovery.selectedDeviceIndex(serialNumbers: [], selectedSerial: "")
+        }
+        let endpoints = [EcoFlowUSBDiscovery.SerialEndpoint(path: "/dev/cu.fixture-bravo", deviceRegistryID: 22),
+                         EcoFlowUSBDiscovery.SerialEndpoint(path: "/dev/cu.fixture-alpha", deviceRegistryID: 11)]
+        check(EcoFlowUSBDiscovery.serialPath(in: endpoints, deviceRegistryID: 11) == "/dev/cu.fixture-alpha",
+              "CDC telemetry is bound to the same USB parent as HID battery and AC readings")
+        check(EcoFlowUSBDiscovery.serialPath(in: endpoints, deviceRegistryID: 22) == "/dev/cu.fixture-bravo",
+              "The second monitor uses its own station's CDC endpoint")
+        check(EcoFlowUSBDiscovery.serialPath(in: endpoints, deviceRegistryID: 33) == nil,
+              "An absent CDC endpoint never borrows the other station's watts")
     }
 
     static func telemetryDecisionChecks() {
